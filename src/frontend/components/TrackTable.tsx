@@ -1,3 +1,4 @@
+import { useDraggable } from "@dnd-kit/core";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SortableTrackKey, SortState, Track } from "../designTypes";
 import { classNames, EnergyBars, formatPlays, StarRating, ui } from "./common";
@@ -145,23 +146,29 @@ const TrackRow = memo(function TrackRow({
   const compatColor = baseTrack && baseTrack.id !== track.id ? "#3a3c44" : "#3a3c44";
   const keyColor = keyColors[track.key] ?? "#cdb46a";
   const energyColor = track.energy >= 8 ? "#c95a72" : track.energy >= 6 ? "#cdb46a" : track.energy >= 4 ? "#4ea892" : "#5b5e67";
+  const { attributes, isDragging, listeners, setNodeRef } = useDraggable({
+    id: `track:${track.id}`,
+    data: { trackId: track.id }
+  });
 
   return (
     <div
+      ref={setNodeRef}
       data-testid="track-row"
+      data-track-id={track.id}
       className={classNames(
-        "grid h-[26px] cursor-default items-center border-b border-[#131418] text-[12px] text-text-1 hover:bg-surface-2",
+        "grid h-[26px] cursor-grab select-none items-center border-b border-[#131418] text-[12px] text-text-1 hover:bg-surface-2 active:cursor-grabbing",
         selected && "bg-accent/10 shadow-[inset_2px_0_0_var(--color-accent)] hover:bg-accent/15",
         multiSelected && "bg-accent/5",
         hovered && "bg-surface-2",
         !track.analyzed && "text-text-2"
       )}
-      style={{ gridTemplateColumns }}
-      draggable
-      onDragStart={(event) => {
-        event.dataTransfer.setData("text/track-id", track.id);
-        event.dataTransfer.effectAllowed = "copy";
+      style={{
+        gridTemplateColumns,
+        opacity: isDragging ? 0.35 : undefined
       }}
+      {...attributes}
+      {...listeners}
       onMouseEnter={() => setHoveredId(track.id)}
       onMouseLeave={() => setHoveredId(null)}
       onClick={(event) => {

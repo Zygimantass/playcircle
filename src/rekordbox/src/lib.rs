@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_REKORDBOX_SQLCIPHER_KEY: &str =
@@ -11,12 +12,16 @@ pub const DEFAULT_REKORDBOX_SQLCIPHER_KEY: &str =
 #[derive(Debug)]
 pub enum RekordboxError {
     Sqlite(rusqlite::Error),
+    Io(std::io::Error),
+    Validation(String),
 }
 
 impl std::fmt::Display for RekordboxError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(error) => write!(formatter, "{error}"),
+            Self::Io(error) => write!(formatter, "{error}"),
+            Self::Validation(message) => write!(formatter, "{message}"),
         }
     }
 }
@@ -29,11 +34,18 @@ impl From<rusqlite::Error> for RekordboxError {
     }
 }
 
+impl From<std::io::Error> for RekordboxError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 pub type Result<T> = std::result::Result<T, RekordboxError>;
 
 #[derive(Debug)]
 pub struct RekordboxDatabase {
     connection: Connection,
+    path: PathBuf,
     analysis_roots: Vec<PathBuf>,
 }
 
@@ -103,11 +115,28 @@ impl RekordboxDatabase {
     }
 
     pub fn open_with_key(path: impl AsRef<Path>, key: &str) -> Result<Self> {
-        let path = path.as_ref();
-        let connection = Connection::open_with_flags(
+        Self::open_with_key_and_flags(
             path,
+            key,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        )
+    }
+
+    pub fn open_read_write(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_write_with_key(path, DEFAULT_REKORDBOX_SQLCIPHER_KEY)
+    }
+
+    pub fn open_read_write_with_key(path: impl AsRef<Path>, key: &str) -> Result<Self> {
+        Self::open_with_key_and_flags(
+            path,
+            key,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    }
+
+    fn open_with_key_and_flags(path: impl AsRef<Path>, key: &str, flags: OpenFlags) -> Result<Self> {
+        let path = path.as_ref();
+        let connection = Connection::open_with_flags(path, flags)?;
 
         connection.pragma_update(None, "key", key)?;
         // Force a read immediately so wrong keys fail at open time instead of later queries.
@@ -115,6 +144,7 @@ impl RekordboxDatabase {
 
         Ok(Self {
             connection,
+            path: path.to_path_buf(),
             analysis_roots: analysis_roots(path),
         })
     }
@@ -299,6 +329,265 @@ impl RekordboxDatabase {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(RekordboxError::from)
     }
+
+    pub fn create_playlist(
+        &mut self,
+        parent_id: Option<&str>,
+        name: &str,
+    ) -> Result<RekordboxPlaylist> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RekordboxError::Validation(
+                "playlist name cannot be empty".to_string(),
+            ));
+        }
+
+        self.backup_database_file()?;
+        let parent_id = parent_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("root");
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if parent_id != "root" {
+            let parent_exists: Option<i64> = transaction
+                .query_row(
+                    r#"
+                    SELECT 1
+                    FROM djmdPlaylist
+                    WHERE ID = ?1
+                      AND COALESCE(rb_local_deleted, 0) = 0
+                    "#,
+                    [parent_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if parent_exists.is_none() {
+                return Err(RekordboxError::Validation(format!(
+                    "playlist parent {parent_id} does not exist"
+                )));
+            }
+        }
+
+        let id = next_numeric_playlist_id(&transaction)?;
+        let sequence = next_playlist_sequence(&transaction, parent_id)?;
+        let uuid = random_uuid(&transaction)?;
+        let rb_local_usn = next_local_usn(&transaction, "djmdPlaylist")?;
+
+        transaction.execute(
+            r#"
+            INSERT INTO djmdPlaylist (
+                ID, Seq, Name, ImagePath, Attribute, ParentID, SmartList, UUID,
+                rb_data_status, rb_local_data_status, rb_local_deleted, rb_local_synced,
+                usn, rb_local_usn, created_at, updated_at
+            )
+            VALUES (
+                ?1, ?2, ?3, '', 0, ?4, '', ?5,
+                0, 1, 0, 0,
+                NULL, ?6, strftime('%Y-%m-%d %H:%M:%f +00:00', 'now'), strftime('%Y-%m-%d %H:%M:%f +00:00', 'now')
+            )
+            "#,
+            (&id, sequence, name, parent_id, &uuid, rb_local_usn),
+        )?;
+        transaction.commit()?;
+
+        self.read_playlist(&id)
+    }
+
+    pub fn add_tracks_to_playlist(
+        &mut self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<RekordboxPlaylist> {
+        if playlist_id.trim().is_empty() {
+            return Err(RekordboxError::Validation(
+                "playlist id cannot be empty".to_string(),
+            ));
+        }
+        if track_ids.is_empty() {
+            return self.read_playlist(playlist_id);
+        }
+
+        self.backup_database_file()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let is_folder: Option<i64> = transaction
+            .query_row(
+                r#"
+                SELECT COALESCE(Attribute, 0)
+                FROM djmdPlaylist
+                WHERE ID = ?1
+                  AND COALESCE(rb_local_deleted, 0) = 0
+                "#,
+                [playlist_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(attribute) = is_folder else {
+            return Err(RekordboxError::Validation(format!(
+                "playlist {playlist_id} does not exist"
+            )));
+        };
+        if attribute == 1 {
+            return Err(RekordboxError::Validation(
+                "cannot add tracks to a playlist folder".to_string(),
+            ));
+        }
+
+        let mut existing_content_statement = transaction.prepare(
+            r#"
+            SELECT ContentID
+            FROM djmdSongPlaylist
+            WHERE PlaylistID = ?1
+              AND COALESCE(rb_local_deleted, 0) = 0
+            "#,
+        )?;
+        let existing_rows =
+            existing_content_statement.query_map([playlist_id], |row| row.get::<_, String>(0))?;
+        let mut existing_track_ids = existing_rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(existing_content_statement);
+
+        let mut last_track_no: i64 = transaction.query_row(
+            r#"
+            SELECT COALESCE(MAX(TrackNo), 0)
+            FROM djmdSongPlaylist
+            WHERE PlaylistID = ?1
+              AND COALESCE(rb_local_deleted, 0) = 0
+            "#,
+            [playlist_id],
+            |row| row.get(0),
+        )?;
+
+        for track_id in track_ids {
+            if existing_track_ids.iter().any(|id| id == track_id) {
+                continue;
+            }
+
+            let track_exists: Option<i64> = transaction
+                .query_row(
+                    r#"
+                    SELECT 1
+                    FROM djmdContent
+                    WHERE ID = ?1
+                      AND COALESCE(rb_local_deleted, 0) = 0
+                    "#,
+                    [track_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if track_exists.is_none() {
+                return Err(RekordboxError::Validation(format!(
+                    "track {track_id} does not exist"
+                )));
+            }
+
+            last_track_no += 1;
+            let id = random_uuid(&transaction)?;
+            let uuid = random_uuid(&transaction)?;
+            let rb_local_usn = next_local_usn(&transaction, "djmdSongPlaylist")?;
+            transaction.execute(
+                r#"
+                INSERT INTO djmdSongPlaylist (
+                    ID, PlaylistID, ContentID, TrackNo, UUID,
+                    rb_data_status, rb_local_data_status, rb_local_deleted, rb_local_synced,
+                    usn, rb_local_usn, created_at, updated_at
+                )
+                VALUES (
+                    ?1, ?2, ?3, ?4, ?5,
+                    0, 1, 0, 0,
+                    NULL, ?6, strftime('%Y-%m-%d %H:%M:%f +00:00', 'now'), strftime('%Y-%m-%d %H:%M:%f +00:00', 'now')
+                )
+                "#,
+                (&id, playlist_id, track_id, last_track_no, &uuid, rb_local_usn),
+            )?;
+            existing_track_ids.push(track_id.clone());
+        }
+
+        transaction.execute(
+            "UPDATE djmdPlaylist SET updated_at = strftime('%Y-%m-%d %H:%M:%f +00:00', 'now'), rb_local_data_status = 1 WHERE ID = ?1",
+            [playlist_id],
+        )?;
+        transaction.commit()?;
+
+        self.read_playlist(playlist_id)
+    }
+
+    fn read_playlist(&self, playlist_id: &str) -> Result<RekordboxPlaylist> {
+        self.read_playlists()?
+            .into_iter()
+            .find(|playlist| playlist.id == playlist_id)
+            .ok_or_else(|| {
+                RekordboxError::Validation(format!("playlist {playlist_id} does not exist"))
+            })
+    }
+
+    fn backup_database_file(&self) -> Result<PathBuf> {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("master.db");
+        let backup_name = format!("{file_name}.playcircle-backup-{timestamp_ms}.db");
+        let backup_path = self.path.with_file_name(backup_name);
+        fs::copy(&self.path, &backup_path)?;
+        Ok(backup_path)
+    }
+}
+
+fn next_numeric_playlist_id(connection: &Connection) -> Result<String> {
+    let next_id: i64 = connection.query_row(
+        r#"
+        SELECT COALESCE(MAX(CASE WHEN ID GLOB '[0-9]*' THEN CAST(ID AS INTEGER) ELSE 0 END), 0) + 1
+        FROM djmdPlaylist
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(next_id.to_string())
+}
+
+fn next_playlist_sequence(connection: &Connection, parent_id: &str) -> Result<i64> {
+    let next_sequence: i64 = connection.query_row(
+        r#"
+        SELECT COALESCE(MAX(Seq), 0) + 1
+        FROM djmdPlaylist
+        WHERE COALESCE(ParentID, 'root') = ?1
+          AND COALESCE(rb_local_deleted, 0) = 0
+        "#,
+        [parent_id],
+        |row| row.get(0),
+    )?;
+    Ok(next_sequence)
+}
+
+fn next_local_usn(connection: &Connection, table_name: &str) -> Result<i64> {
+    let sql = format!("SELECT COALESCE(MAX(rb_local_usn), 0) + 1 FROM {table_name}");
+    let next_usn = connection.query_row(&sql, [], |row| row.get(0))?;
+    Ok(next_usn)
+}
+
+fn random_uuid(connection: &Connection) -> Result<String> {
+    connection
+        .query_row(
+            r#"
+            SELECT lower(hex(randomblob(4))) || '-' ||
+                   lower(hex(randomblob(2))) || '-' ||
+                   '4' || substr(lower(hex(randomblob(2))), 2) || '-' ||
+                   substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
+                   lower(hex(randomblob(6)))
+            "#,
+            [],
+            |row| row.get(0),
+        )
+        .map_err(RekordboxError::from)
 }
 
 fn analysis_roots(master_db_path: &Path) -> Vec<PathBuf> {
@@ -430,6 +719,36 @@ mod tests {
             .join("master.db")
     }
 
+    fn writable_fixture_copy() -> PathBuf {
+        let source = fixture_master_db();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let target = std::env::temp_dir().join(format!("playcircle-rekordbox-write-{unique}.db"));
+        fs::copy(source, &target).expect("copy rekordbox fixture");
+        target
+    }
+
+    fn remove_fixture_copy_and_backups(path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            return;
+        };
+        let backup_prefix = format!("{file_name}.playcircle-backup-");
+        let _ = fs::remove_file(path);
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_str().is_some_and(|value| value.starts_with(&backup_prefix)) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
     #[test]
     fn opens_encrypted_rekordbox_master_database() {
         let db = RekordboxDatabase::open(fixture_master_db()).expect("open encrypted rekordbox db");
@@ -503,5 +822,56 @@ mod tests {
         let result = RekordboxDatabase::open_with_key(fixture_master_db(), "wrong");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn creates_playlist_in_writable_database_copy() {
+        let path = writable_fixture_copy();
+        let mut db =
+            RekordboxDatabase::open_read_write(&path).expect("open writable rekordbox copy");
+
+        let playlist = db
+            .create_playlist(None, "Playcircle Test")
+            .expect("create playlist");
+
+        assert_eq!(playlist.name, "Playcircle Test");
+        assert_eq!(playlist.parent_id, None);
+        assert!(!playlist.is_folder);
+
+        drop(db);
+        let db = RekordboxDatabase::open(&path).expect("reopen copy readonly");
+        let playlists = db.read_playlists().expect("read playlists");
+        assert!(playlists
+            .iter()
+            .any(|item| item.id == playlist.id && item.name == "Playcircle Test"));
+        remove_fixture_copy_and_backups(&path);
+    }
+
+    #[test]
+    fn appends_tracks_to_playlist_in_writable_database_copy() {
+        let path = writable_fixture_copy();
+        let mut db =
+            RekordboxDatabase::open_read_write(&path).expect("open writable rekordbox copy");
+        let tracks = db.read_tracks().expect("read tracks");
+        let track_ids = tracks
+            .iter()
+            .take(3)
+            .map(|track| track.id.clone())
+            .collect::<Vec<_>>();
+        let playlist = db
+            .create_playlist(None, "Playcircle Add Test")
+            .expect("create playlist");
+
+        let playlist = db
+            .add_tracks_to_playlist(&playlist.id, &track_ids)
+            .expect("add tracks");
+
+        assert_eq!(playlist.track_ids, track_ids);
+
+        let playlist = db
+            .add_tracks_to_playlist(&playlist.id, &playlist.track_ids.clone())
+            .expect("skip duplicate tracks");
+        assert_eq!(playlist.track_ids.len(), 3);
+        remove_fixture_copy_and_backups(&path);
     }
 }

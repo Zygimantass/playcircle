@@ -1,3 +1,4 @@
+import { useDroppable } from "@dnd-kit/core";
 import { memo, useState } from "react";
 import type { CurrentNode, PcData, PlaylistEntry } from "../designTypes";
 import { classNames, ui } from "./common";
@@ -7,6 +8,7 @@ type SidebarProps = {
   currentNode: CurrentNode;
   setCurrentNode: (node: CurrentNode) => void;
   onDropToCrate: (crateId: string, trackId: string) => void;
+  onCreatePlaylist: () => void;
   dragHoverCrate: string | null;
   setDragHoverCrate: (crateId: string | null) => void;
 };
@@ -79,12 +81,22 @@ function PlaylistTreeItem({
   depth?: number;
 }) {
   const [open, setOpen] = useState(true);
+  const { isOver, setNodeRef } = useDroppable({
+    id: `playlist:${playlist.id}`,
+    disabled: playlist.isFolder
+  });
   const hasChildren = playlist.children.length > 0;
 
   return (
     <div>
       <button
-        className={classNames(ui.sideItem, "w-full", currentNode.type === "playlist" && currentNode.id === playlist.id && ui.activeSideItem)}
+        ref={setNodeRef}
+        className={classNames(
+          ui.sideItem,
+          "w-full",
+          currentNode.type === "playlist" && currentNode.id === playlist.id && ui.activeSideItem,
+          isOver && !playlist.isFolder && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim"
+        )}
         style={{ paddingLeft: `${18 + depth * 12}px` }}
         onClick={() => setCurrentNode({ type: "playlist", id: playlist.id })}
       >
@@ -118,7 +130,7 @@ function PlaylistTreeItem({
   );
 }
 
-export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode, onDropToCrate, dragHoverCrate, setDragHoverCrate }: SidebarProps) {
+export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode, onDropToCrate, onCreatePlaylist, dragHoverCrate, setDragHoverCrate }: SidebarProps) {
   const recentCount = data.TRACKS.filter((track) => track.added.startsWith("2025")).length;
   const fiveStarCount = data.TRACKS.filter((track) => track.rating === 5).length;
 
@@ -152,6 +164,14 @@ export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode
       </SidebarSection>
 
       <SidebarSection title="PLAYLISTS" count={data.PLAYLISTS.length}>
+        <button
+          className={classNames(ui.sideItem, "mb-1 w-full text-text-2 hover:text-text-1")}
+          type="button"
+          onClick={onCreatePlaylist}
+        >
+          <span className="w-3 text-center text-[12px] text-accent">+</span>
+          <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">New playlist</span>
+        </button>
         {data.PLAYLISTS.map((playlist) => (
           <PlaylistTreeItem
             key={playlist.id}

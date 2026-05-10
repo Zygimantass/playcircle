@@ -73,6 +73,30 @@ export function loadRekordboxLibrary(path?: string) {
   return invoke<RekordboxLibraryDto>("load_rekordbox_library", { path });
 }
 
+export function createRekordboxPlaylist(name: string, parentId?: string | null, path?: string) {
+  if (shouldUseBrowserFixture()) {
+    return Promise.reject(new Error("Rekordbox fixture mode is read-only"));
+  }
+
+  return invoke<RekordboxPlaylistDto>("create_rekordbox_playlist", {
+    path,
+    parentId: parentId ?? null,
+    name
+  });
+}
+
+export function addRekordboxTracksToPlaylist(playlistId: string, trackIds: string[], path?: string) {
+  if (shouldUseBrowserFixture()) {
+    return Promise.reject(new Error("Rekordbox fixture mode is read-only"));
+  }
+
+  return invoke<RekordboxPlaylistDto>("add_rekordbox_tracks_to_playlist", {
+    path,
+    playlistId,
+    trackIds
+  });
+}
+
 export function loadRekordboxBeatGrid(analysisDataPath: string, path?: string) {
   if (shouldUseBrowserFixture()) return Promise.resolve<RekordboxBeatDto[]>([]);
 

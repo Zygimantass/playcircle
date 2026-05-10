@@ -165,6 +165,7 @@ export function Waveform({
       <path d={bandPaths.low} fill={bandColors.low} opacity={isOverview ? 0.86 : 0.98} />
       <path d={bandPaths.mid} fill={bandColors.mid} opacity={isOverview ? 0.9 : 1} />
       <path d={bandPaths.high} fill={bandColors.high} opacity={isOverview ? 0.92 : 1} />
+      <MinuteMarkers width={width} height={viewBoxHeight} windowRange={windowRange} windowSpan={windowSpan} />
       {!isOverview && <BeatGridMarkers beatGrid={beatGrid} width={width} height={viewBoxHeight} windowRange={windowRange} windowSpan={windowSpan} />}
       {isOverview && <OverviewBeatMarkers beatGrid={beatGrid} width={width} height={viewBoxHeight} totalSec={track.totalSec} />}
       {track.cues.map((cue) => {
@@ -176,6 +177,47 @@ export function Waveform({
       })}
       <line x1={playheadX} y1={0} x2={playheadX} y2={viewBoxHeight} stroke="#ff3b30" strokeWidth="1" vectorEffect="non-scaling-stroke" />
     </svg>
+  );
+}
+
+function MinuteMarkers({
+  width,
+  height,
+  windowRange,
+  windowSpan
+}: {
+  width: number;
+  height: number;
+  windowRange: { startSec: number; endSec: number };
+  windowSpan: number;
+}) {
+  const firstMinute = Math.ceil(windowRange.startSec / 60);
+  const lastMinute = Math.floor(windowRange.endSec / 60);
+  if (lastMinute < firstMinute) return null;
+
+  return (
+    <g>
+      {Array.from({ length: lastMinute - firstMinute + 1 }, (_, index) => {
+        const minute = firstMinute + index;
+        const timeSec = minute * 60;
+        const x = ((timeSec - windowRange.startSec) / windowSpan) * width;
+        if (x < 0 || x > width) return null;
+
+        return (
+          <line
+            key={`minute-${minute}`}
+            x1={x}
+            y1={height - 6}
+            x2={x}
+            y2={height - 2}
+            stroke="#d6d7da"
+            strokeWidth="1"
+            opacity="0.56"
+            vectorEffect="non-scaling-stroke"
+          />
+        );
+      })}
+    </g>
   );
 }
 

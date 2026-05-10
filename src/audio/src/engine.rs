@@ -203,6 +203,14 @@ impl AudioEngine {
             .map(str::to_string))
     }
 
+    pub fn deck_level_db(&self, deck: DeckId) -> Result<f32, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "audio engine state lock poisoned".to_string())?;
+        Ok(state.deck_level_db(deck))
+    }
+
     fn send(&self, command: AudioCommand) -> Result<(), String> {
         self.commands
             .send(command)
@@ -273,6 +281,7 @@ enum AudioCommand {
 
 struct MixerState {
     decks: [Deck; 2],
+    deck_levels: [LevelMeter; 2],
     master_volume: f32,
     cue_volume: f32,
 }
@@ -287,6 +296,7 @@ impl MixerState {
 
         Self {
             decks: [deck_a, deck_b],
+            deck_levels: [LevelMeter::new(), LevelMeter::new()],
             master_volume: 0.9,
             cue_volume: 0.9,
         }
@@ -296,14 +306,17 @@ impl MixerState {
         let mut master = [0.0, 0.0];
         let mut cue = [0.0, 0.0];
 
-        for deck in &mut self.decks {
+        for (index, deck) in self.decks.iter_mut().enumerate() {
             if let Some(frame) = deck.next_frame() {
+                self.deck_levels[index].observe_frame(frame);
                 master[0] += frame[0];
                 master[1] += frame[1];
                 if deck.cue_enabled() {
                     cue[0] += frame[0];
                     cue[1] += frame[1];
                 }
+            } else {
+                self.deck_levels[index].decay_silence();
             }
         }
 
@@ -374,6 +387,42 @@ impl MixerState {
                 self.master_volume = volume.clamp(0.0, 1.5);
             }
         }
+    }
+
+    fn deck_level_db(&self, deck: DeckId) -> f32 {
+        self.deck_levels[deck.index()].db()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LevelMeter {
+    peak: f32,
+}
+
+impl LevelMeter {
+    fn new() -> Self {
+        Self { peak: 0.0 }
+    }
+
+    fn observe_frame(&mut self, frame: [f32; 2]) {
+        let sample_peak = frame[0].abs().max(frame[1].abs());
+        self.peak = self.peak.max(sample_peak).min(2.0);
+        self.peak *= 0.9995;
+    }
+
+    fn decay_silence(&mut self) {
+        self.peak *= 0.995;
+        if self.peak < 0.000_001 {
+            self.peak = 0.0;
+        }
+    }
+
+    fn db(&self) -> f32 {
+        if self.peak <= 0.000_001 {
+            return -60.0;
+        }
+
+        (20.0 * self.peak.log10()).clamp(-60.0, 6.0)
     }
 }
 

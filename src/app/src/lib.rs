@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use playcircle_audio::{decoder::decode_file, AudioEngine, DeckId};
-use playcircle_rekordbox::{RekordboxBeat, RekordboxDatabase, RekordboxLibrary, RekordboxTrack};
+use playcircle_rekordbox::{
+    RekordboxBeat, RekordboxDatabase, RekordboxLibrary, RekordboxPlaylist, RekordboxTrack,
+};
 
 struct AudioEngineState(Mutex<Option<AudioEngine>>);
 
@@ -31,6 +33,38 @@ fn load_rekordbox_library(path: Option<String>) -> Result<RekordboxLibrary, Stri
 }
 
 #[tauri::command]
+fn create_rekordbox_playlist(
+    path: Option<String>,
+    parent_id: Option<String>,
+    name: String,
+) -> Result<RekordboxPlaylist, String> {
+    let db_path = path
+        .map(PathBuf::from)
+        .unwrap_or_else(default_demo_database_path);
+    let mut db = RekordboxDatabase::open_read_write(&db_path)
+        .map_err(|error| format!("failed to open {} for writing: {error}", db_path.display()))?;
+
+    db.create_playlist(parent_id.as_deref(), &name)
+        .map_err(|error| format!("failed to create playlist in {}: {error}", db_path.display()))
+}
+
+#[tauri::command]
+fn add_rekordbox_tracks_to_playlist(
+    path: Option<String>,
+    playlist_id: String,
+    track_ids: Vec<String>,
+) -> Result<RekordboxPlaylist, String> {
+    let db_path = path
+        .map(PathBuf::from)
+        .unwrap_or_else(default_demo_database_path);
+    let mut db = RekordboxDatabase::open_read_write(&db_path)
+        .map_err(|error| format!("failed to open {} for writing: {error}", db_path.display()))?;
+
+    db.add_tracks_to_playlist(&playlist_id, &track_ids)
+        .map_err(|error| format!("failed to add tracks to playlist in {}: {error}", db_path.display()))
+}
+
+#[tauri::command]
 fn load_rekordbox_beat_grid(
     path: Option<String>,
     analysis_data_path: String,
@@ -49,10 +83,14 @@ fn default_demo_database_path() -> PathBuf {
 }
 
 #[tauri::command]
-fn load_audio_waveform(path: String, bins: Option<usize>) -> Result<Vec<(f32, f32)>, String> {
-    let bins = bins.unwrap_or(512).clamp(32, 4096);
-    let frames = decode_file(PathBuf::from(&path).as_path(), 44_100)?;
-    Ok(audio_waveform(&frames, bins))
+async fn load_audio_waveform(path: String, bins: Option<usize>) -> Result<Vec<(f32, f32)>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bins = bins.unwrap_or(512).clamp(32, 4096);
+        let frames = decode_file(PathBuf::from(&path).as_path(), 44_100)?;
+        Ok(audio_waveform(&frames, bins))
+    })
+    .await
+    .map_err(|error| format!("waveform task failed: {error}"))?
 }
 
 fn audio_waveform(frames: &[[f32; 2]], bins: usize) -> Vec<(f32, f32)> {
@@ -247,6 +285,16 @@ fn audio_deck_error(
     })
 }
 
+#[tauri::command]
+fn audio_deck_level_db(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+) -> Result<f32, String> {
+    with_audio_engine(&state, |engine| {
+        engine.deck_level_db(DeckId::from_label(&deck)?)
+    })
+}
+
 fn with_audio_engine<T>(
     state: &tauri::State<'_, AudioEngineState>,
     action: impl FnOnce(&AudioEngine) -> Result<T, String>,
@@ -269,6 +317,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_rekordbox_tracks,
             load_rekordbox_library,
+            create_rekordbox_playlist,
+            add_rekordbox_tracks_to_playlist,
             load_rekordbox_beat_grid,
             load_audio_waveform,
             load_audio_deck,
@@ -286,7 +336,8 @@ pub fn run() {
             set_audio_deck_cue,
             set_audio_master_volume,
             audio_deck_position,
-            audio_deck_error
+            audio_deck_error,
+            audio_deck_level_db
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playcircle");

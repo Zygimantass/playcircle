@@ -19,6 +19,7 @@
     "perf:decode": "npm run fixture:rekordbox && cargo run --release -q -p playcircle-audio --example decode_perf -- \"$(node scripts/first-existing-rekordbox-audio.mjs)\""
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
     "@tauri-apps/api": "latest",
     "react": "latest",
     "react-dom": "latest"

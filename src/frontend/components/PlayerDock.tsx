@@ -1,3 +1,4 @@
+import { useDroppable } from "@dnd-kit/core";
 import { memo, useRef, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 import type { Track } from "../designTypes";
 import { classNames, DEFAULT_BEAT_WAVEFORM_BEATS, Waveform, waveformClickPosition } from "./common";
@@ -13,6 +14,7 @@ type DeckState = {
   track: Track;
   playing: boolean;
   position: number;
+  levelDb: number;
   syncEnabled: boolean;
   syncRole: SyncRole;
   tempoPercent: number;
@@ -41,6 +43,7 @@ type PlayerDockProps = {
   deckA: DeckState;
   deckB: DeckState;
   crossfader: number;
+  trackDragActive: boolean;
   onBeatSync: (deck: DeckId) => void;
   onCycleTempoRange: (deck: DeckId) => void;
   onSetCrossfader: (value: number) => void;
@@ -61,6 +64,7 @@ export const PlayerDock = memo(function PlayerDock({
   deckA,
   deckB,
   crossfader,
+  trackDragActive,
   onBeatSync,
   onCycleTempoRange,
   onSetCrossfader,
@@ -77,7 +81,7 @@ export const PlayerDock = memo(function PlayerDock({
   onScratchStart
 }: PlayerDockProps) {
   return (
-    <section className="grid h-full min-h-0 min-w-0 grid-rows-[minmax(88px,0.42fr)_minmax(150px,1fr)] overflow-hidden bg-[#0b0c10]">
+    <section data-player-dock-drop-region className="grid h-full min-h-0 min-w-0 grid-rows-[minmax(88px,0.42fr)_minmax(150px,1fr)] overflow-hidden bg-[#0b0c10]">
       <BeatMatchWaveforms
         deckA={deckA}
         deckB={deckB}
@@ -90,6 +94,7 @@ export const PlayerDock = memo(function PlayerDock({
         <DeckControls
           deck="A"
           state={deckA}
+          trackDragActive={trackDragActive}
           onBeatSync={onBeatSync}
           onCueAction={onCueAction}
           onCycleTempoRange={onCycleTempoRange}
@@ -105,6 +110,7 @@ export const PlayerDock = memo(function PlayerDock({
           deckA={deckA}
           deckB={deckB}
           crossfader={crossfader}
+          trackDragActive={trackDragActive}
           onSetEq={onSetEq}
           onSetFilter={onSetFilter}
           onSetCrossfader={onSetCrossfader}
@@ -113,6 +119,7 @@ export const PlayerDock = memo(function PlayerDock({
         <DeckControls
           deck="B"
           state={deckB}
+          trackDragActive={trackDragActive}
           onBeatSync={onBeatSync}
           onCueAction={onCueAction}
           onCycleTempoRange={onCycleTempoRange}
@@ -176,11 +183,14 @@ function BeatWaveformDeck({
   const track = state.track;
   const elapsed = Math.floor(state.position * track.totalSec);
   const dragRef = useRef<WaveformDragState | null>(null);
+  const { isOver, setNodeRef } = useDroppable({ id: `deck:${deck}:beat` });
 
   return (
     <section className="min-h-0 min-w-0 border-b border-line last:border-b-0">
       <button
-        className="relative h-full min-h-0 w-full min-w-0 cursor-grab touch-none overflow-hidden bg-[#07080b] text-left active:cursor-grabbing"
+        ref={setNodeRef}
+        data-testid={`deck-${deck}-beat-drop`}
+        className={classNames("relative h-full min-h-0 w-full min-w-0 cursor-grab touch-none overflow-hidden bg-[#07080b] text-left active:cursor-grabbing", isOver && "outline outline-1 -outline-offset-1 outline-accent")}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
           dragRef.current = {
@@ -235,6 +245,7 @@ function sourceWindowSecondsForOutputWindow(state: DeckState, outputWindowSecond
 function DeckControls({
   deck,
   state,
+  trackDragActive,
   onBeatSync,
   onCueAction,
   onCycleTempoRange,
@@ -248,6 +259,7 @@ function DeckControls({
 }: {
   deck: DeckId;
   state: DeckState;
+  trackDragActive: boolean;
   onBeatSync: (deck: DeckId) => void;
   onCueAction: (deck: DeckId) => void;
   onCycleTempoRange: (deck: DeckId) => void;
@@ -264,9 +276,14 @@ function DeckControls({
   const elapsed = Math.floor(state.position * track.totalSec);
   const bpmLabel = formatDeckBpm(track.bpm, state.tempoPercent);
   const overviewDragRef = useRef<WaveformDragState | null>(null);
+  const { isOver, setNodeRef } = useDroppable({ id: `deck:${deck}:controls` });
 
   return (
-    <section className="grid min-h-0 min-w-0 grid-rows-[44px_minmax(0,1fr)] overflow-hidden border-r border-line bg-gradient-to-b from-surface-1 to-[#0d0e12] last:border-r-0">
+    <section
+      ref={setNodeRef}
+      data-testid={`deck-${deck}-drop`}
+      className={classNames("grid min-h-0 min-w-0 grid-rows-[44px_minmax(0,1fr)] overflow-hidden border-r border-line bg-gradient-to-b from-surface-1 to-[#0d0e12] last:border-r-0", isOver && "outline outline-1 -outline-offset-1 outline-accent")}
+    >
       <div className="flex min-w-0 items-center justify-between gap-3 border-b border-line px-4">
         <div className="flex min-w-0 items-center gap-2">
           <span className="grid size-7 shrink-0 place-items-center rounded-sm bg-accent font-mono text-[13px] font-bold text-bg">{deck}</span>
@@ -313,33 +330,44 @@ function DeckControls({
         >
           <Waveform track={track} height={40} playhead={state.position} variant="overview" />
         </button>
-        <div className="grid min-h-0 grid-rows-[36px_minmax(0,1fr)] gap-2 px-4 py-3">
-          <div className="flex min-w-0 items-center justify-between gap-3">
-            <div className="flex shrink-0 items-center gap-1">
-              <button
-                className={classNames("grid size-8 place-items-center rounded-full border font-mono text-[9px]", state.playing ? "border-accent bg-accent/15 text-accent" : "border-line-2 bg-surface-2 text-text-2 hover:bg-surface-3 hover:text-text-1")}
-                onClick={() => onCueAction(deck)}
-                type="button"
-              >
-                CUE
-              </button>
-              <button className={classNames("grid size-8 place-items-center rounded-full text-bg", state.playing ? "bg-warn" : "bg-accent")} onClick={() => onSetPlaying(deck, !state.playing)} type="button">
-              {state.playing ? "Ⅱ" : "▶"}
-              </button>
-            </div>
+        <div className={classNames("grid min-h-0 gap-3 px-4 py-3", deck === "A" ? "grid-cols-[minmax(0,1fr)_112px]" : "grid-cols-[112px_minmax(0,1fr)]")}>
+          {deck === "B" && (
+            <TempoControl
+              deck={deck}
+              playing={state.playing}
+              trackDragActive={trackDragActive}
+              tempoPercent={state.tempoPercent}
+              tempoRange={state.tempoRange}
+              syncEnabled={state.syncEnabled}
+              syncRole={state.syncRole}
+              onBeatSync={onBeatSync}
+              onCueAction={onCueAction}
+              onCycleTempoRange={onCycleTempoRange}
+              onSetMasterDeck={onSetMasterDeck}
+              onSetPlaying={onSetPlaying}
+              onSetTempo={onSetTempo}
+            />
+          )}
+          <div className={classNames("grid min-h-0 content-start gap-2", deck === "B" && "justify-items-end text-right")}>
             <span className="font-mono text-[10px] text-text-3">{formatClock(Math.floor(state.cuePoint * track.totalSec))}</span>
           </div>
+          {deck === "A" && (
           <TempoControl
             deck={deck}
+            playing={state.playing}
+            trackDragActive={trackDragActive}
             tempoPercent={state.tempoPercent}
             tempoRange={state.tempoRange}
             syncEnabled={state.syncEnabled}
             syncRole={state.syncRole}
             onBeatSync={onBeatSync}
+            onCueAction={onCueAction}
             onCycleTempoRange={onCycleTempoRange}
             onSetMasterDeck={onSetMasterDeck}
+            onSetPlaying={onSetPlaying}
             onSetTempo={onSetTempo}
           />
+          )}
         </div>
       </div>
     </section>
@@ -348,41 +376,99 @@ function DeckControls({
 
 function TempoControl({
   deck,
+  playing,
+  trackDragActive,
   tempoPercent,
   tempoRange,
   syncEnabled,
   syncRole,
   onBeatSync,
+  onCueAction,
   onCycleTempoRange,
   onSetMasterDeck,
+  onSetPlaying,
   onSetTempo
 }: {
   deck: DeckId;
+  playing: boolean;
+  trackDragActive: boolean;
   tempoPercent: number;
   tempoRange: number;
   syncEnabled: boolean;
   syncRole: SyncRole;
   onBeatSync: (deck: DeckId) => void;
+  onCueAction: (deck: DeckId) => void;
   onCycleTempoRange: (deck: DeckId) => void;
   onSetMasterDeck: (deck: DeckId) => void;
+  onSetPlaying: (deck: DeckId, playing: boolean) => void;
   onSetTempo: (deck: DeckId, tempoPercent: number) => void;
 }) {
   const isMaster = syncRole === "master";
   const tempoRangeLabel = Math.abs(tempoPercent) > tempoRange ? "SYNC LOCK" : `±${tempoRange}`;
+  const clampedTempo = clamp(tempoPercent, -tempoRange, tempoRange);
+  const ratio = (clampedTempo + tempoRange) / (tempoRange * 2);
+
+  const setFromPointer = (event: PointerEvent<HTMLSpanElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const trackTop = bounds.top + 8;
+    const trackHeight = Math.max(1, bounds.height - 16);
+    const pointerRatio = 1 - (event.clientY - trackTop) / trackHeight;
+    const nextTempo = -tempoRange + clamp(pointerRatio, 0, 1) * tempoRange * 2;
+    onSetTempo(deck, Number(nextTempo.toFixed(1)));
+  };
+
   return (
-    <label className="grid min-w-0 content-start gap-1 font-mono text-[9px] text-text-2">
-      <span className="grid min-w-0 grid-cols-[auto_auto_auto] items-center justify-between gap-1">
-        <span>TEMPO</span>
+    <div className={classNames("grid h-full min-h-0 min-w-0 grid-cols-[32px_28px_44px] items-stretch justify-center gap-2 font-mono text-[9px] text-text-2", trackDragActive && "pointer-events-none")}>
+      <span
+        aria-label={`Deck ${deck} tempo`}
+        aria-valuemax={tempoRange}
+        aria-valuemin={-tempoRange}
+        aria-valuenow={Number(clampedTempo.toFixed(1))}
+        className="relative min-h-0 w-8 cursor-grab touch-none rounded-sm border border-line-2 bg-[#08090c] outline-none active:cursor-grabbing"
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onSetTempo(deck, 0);
+        }}
+        onKeyDown={(event) => handleTempoKeyDown(event, clampedTempo, tempoRange, onSetTempo, deck)}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          setFromPointer(event);
+        }}
+        onPointerMove={(event) => {
+          if (event.buttons !== 1) return;
+          setFromPointer(event);
+        }}
+        onPointerUp={releasePointerCapture}
+        onPointerCancel={releasePointerCapture}
+        role="slider"
+        tabIndex={0}
+      >
+        <span className="absolute left-1/2 top-2 h-[calc(100%-16px)] w-px -translate-x-1/2 bg-line-2" />
+        <span className="absolute left-1/2 top-1/2 h-1 w-4 -translate-x-1/2 -translate-y-1/2 rounded-sm bg-line-2" />
+        <span
+          className="absolute left-1/2 h-3 w-6 -translate-x-1/2 rounded-[2px] border border-line-2 bg-accent shadow-[0_1px_4px_rgba(0,0,0,0.45)]"
+          style={{ top: `calc(2px + ${(1 - ratio) * 100}% - ${(1 - ratio) * 16}px)` }}
+        />
+      </span>
+      <span className="grid content-between text-left text-[8px] text-text-3">
+        <span>+{tempoRange}</span>
+        <span>0</span>
+        <span>-{tempoRange}</span>
+      </span>
+      <span className="grid min-h-0 content-start gap-1">
+        <span className="text-[8px] font-semibold tracking-[0.08em] text-text-3">TEMPO</span>
         <button
-          className="rounded-sm border border-line bg-surface-2 px-1 py-px text-[9px] text-text-1 hover:bg-surface-3"
+          className="rounded-sm border border-line bg-surface-2 px-1 py-1 text-[9px] leading-tight text-text-1 hover:bg-surface-3"
           onClick={() => onCycleTempoRange(deck)}
           type="button"
         >
-          {formatTempo(tempoPercent)} · {tempoRangeLabel}
+          <span className="block">{formatTempo(tempoPercent)}</span>
+          <span className="block text-[8px] text-text-3">{tempoRangeLabel}</span>
         </button>
         <button
           className={classNames(
-            "rounded-sm border px-1 py-px text-[9px]",
+            "rounded-sm border px-1 py-1 text-[9px] leading-tight",
             isMaster || syncEnabled ? "border-accent bg-accent/15 text-accent" : "border-line bg-surface-2 text-text-1 hover:bg-surface-3"
           )}
           onClick={() => {
@@ -393,26 +479,52 @@ function TempoControl({
         >
           {isMaster ? "MASTER" : "SYNC"}
         </button>
+        <button className={classNames("grid h-8 place-items-center rounded-sm text-bg", playing ? "bg-warn" : "bg-accent")} onClick={() => onSetPlaying(deck, !playing)} type="button">
+          {playing ? "Ⅱ" : "▶"}
+        </button>
+        <button
+          className={classNames("grid h-8 place-items-center rounded-sm border font-mono text-[9px]", playing ? "border-accent bg-accent/15 text-accent" : "border-line-2 bg-surface-2 text-text-2 hover:bg-surface-3 hover:text-text-1")}
+          onClick={() => onCueAction(deck)}
+          type="button"
+        >
+          CUE
+        </button>
       </span>
-      <input
-        aria-label={`Deck ${deck} tempo`}
-        className="h-5 accent-[var(--color-accent)]"
-        max={tempoRange}
-        min={-tempoRange}
-        onDoubleClick={() => onSetTempo(deck, 0)}
-        onChange={(event) => onSetTempo(deck, Number(event.currentTarget.value))}
-        step="0.1"
-        type="range"
-        value={clamp(tempoPercent, -tempoRange, tempoRange)}
-      />
-    </label>
+    </div>
   );
+}
+
+function handleTempoKeyDown(
+  event: KeyboardEvent<HTMLSpanElement>,
+  value: number,
+  range: number,
+  onSetTempo: (deck: DeckId, tempoPercent: number) => void,
+  deck: DeckId
+) {
+  const step = event.shiftKey ? 0.1 : 0.5;
+  if (event.key === "ArrowUp" || event.key === "ArrowRight") {
+    event.preventDefault();
+    onSetTempo(deck, Number(clamp(value + step, -range, range).toFixed(1)));
+  } else if (event.key === "ArrowDown" || event.key === "ArrowLeft") {
+    event.preventDefault();
+    onSetTempo(deck, Number(clamp(value - step, -range, range).toFixed(1)));
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    onSetTempo(deck, -range);
+  } else if (event.key === "End") {
+    event.preventDefault();
+    onSetTempo(deck, range);
+  } else if (event.key === "0" || event.key === "Enter") {
+    event.preventDefault();
+    onSetTempo(deck, 0);
+  }
 }
 
 function MixerCenter({
   deckA,
   deckB,
   crossfader,
+  trackDragActive,
   onSetCrossfader,
   onSetEq,
   onSetFilter,
@@ -421,18 +533,19 @@ function MixerCenter({
   deckA: DeckState;
   deckB: DeckState;
   crossfader: number;
+  trackDragActive: boolean;
   onSetCrossfader: (value: number) => void;
   onSetEq: (deck: DeckId, band: EqBand, value: number) => void;
   onSetFilter: (deck: DeckId, amount: number) => void;
   onSetVolume: (deck: DeckId, volume: number) => void;
 }) {
   return (
-    <div className="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_34px] border-x border-line bg-surface-1">
+    <div className={classNames("grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_34px] border-x border-line bg-surface-1", trackDragActive && "pointer-events-none")}>
       <div className="grid min-h-0 grid-cols-2 gap-2 px-3 py-2">
         <MixerDeckStrip
           deck="A"
           eq={deckA.eq}
-          meterValue={deckA.playing ? deckA.volume * crossfadeGain("A", crossfader) : 0}
+          meterDb={deckA.levelDb}
           filterAmount={deckA.filterAmount}
           volume={deckA.volume}
           onSetEq={onSetEq}
@@ -442,7 +555,7 @@ function MixerCenter({
         <MixerDeckStrip
           deck="B"
           eq={deckB.eq}
-          meterValue={deckB.playing ? deckB.volume * crossfadeGain("B", crossfader) : 0}
+          meterDb={deckB.levelDb}
           filterAmount={deckB.filterAmount}
           volume={deckB.volume}
           onSetEq={onSetEq}
@@ -473,7 +586,7 @@ function MixerCenter({
 function MixerDeckStrip({
   deck,
   eq,
-  meterValue,
+  meterDb,
   filterAmount,
   volume,
   onSetEq,
@@ -482,7 +595,7 @@ function MixerDeckStrip({
 }: {
   deck: DeckId;
   eq: { high: number; mid: number; low: number };
-  meterValue: number;
+  meterDb: number;
   filterAmount: number;
   volume: number;
   onSetEq: (deck: DeckId, band: EqBand, value: number) => void;
@@ -497,7 +610,7 @@ function MixerDeckStrip({
       <Knob label="FILTER" value={filterAmount} min={-1} max={1} centerValue={0} onChange={(value) => onSetFilter(deck, value)} />
     </div>
   );
-  const meter = <Meter label="" value={meterValue} />;
+  const meter = <Meter label="" levelDb={meterDb} />;
   const fader = (
     <label className="grid min-h-0 grid-rows-[1fr_14px] gap-1 font-mono text-[9px] text-text-2">
       <VolumeFader deck={deck} value={volume} onChange={(value) => onSetVolume(deck, value)} />
@@ -530,7 +643,9 @@ function VolumeFader({
 }) {
   const setFromPointer = (event: PointerEvent<HTMLSpanElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
-    const ratio = 1 - (event.clientY - bounds.top) / Math.max(1, bounds.height);
+    const trackTop = bounds.top + 8;
+    const trackHeight = Math.max(1, bounds.height - 16);
+    const ratio = 1 - (event.clientY - trackTop) / trackHeight;
     onChange(clamp(ratio, 0, 1));
   };
 
@@ -557,8 +672,8 @@ function VolumeFader({
     >
       <span className="absolute left-1/2 top-2 h-[calc(100%-16px)] w-px -translate-x-1/2 bg-line-2" />
       <span
-        className="absolute left-1/2 h-3 w-6 -translate-x-1/2 rounded-[2px] border border-line-2 bg-accent shadow-[0_1px_4px_rgba(0,0,0,0.45)]"
-        style={{ bottom: `calc(${value * 100}% - 6px)` }}
+        className="absolute left-1/2 top-2 h-3 w-6 -translate-x-1/2 rounded-[2px] border border-line-2 bg-accent shadow-[0_1px_4px_rgba(0,0,0,0.45)]"
+        style={{ top: `calc(2px + ${(1 - value) * 100}% - ${(1 - value) * 16}px)` }}
       />
     </span>
   );
@@ -678,25 +793,41 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function crossfadeGain(deck: DeckId, crossfader: number) {
-  const value = Math.max(-1, Math.min(1, crossfader));
-  if (deck === "A") return value <= 0 ? 1 : 1 - value;
-  return value >= 0 ? 1 : 1 + value;
-}
-
 function playbackRateFromTempo(tempoPercent: number) {
   return Math.max(0.05, 1 + tempoPercent / 100);
 }
 
-function Meter({ label, value }: { label: string; value: number }) {
+function Meter({ label, levelDb }: { label: string; levelDb: number }) {
+  const clampedDb = clamp(levelDb, -60, 6);
+  const greenHeight = dbRangePercent(-60, Math.min(clampedDb, -12));
+  const yellowHeight = clampedDb > -12 ? dbRangePercent(-12, Math.min(clampedDb, -3)) : 0;
+  const redHeight = clampedDb > -3 ? dbRangePercent(-3, clampedDb) : 0;
+
   return (
     <div className="grid h-full grid-rows-[1fr_16px] gap-1">
-      <div className="flex items-end rounded-sm border border-line bg-[#08090c] p-1">
-        <div className="w-full rounded-[1px] bg-accent" style={{ height: `${Math.max(4, value * 100)}%`, opacity: value > 0 ? 0.9 : 0.2 }} />
+      <div className="relative rounded-sm border border-line bg-[#08090c] p-1">
+        <div className="absolute inset-1">
+          <span className="absolute bottom-0 left-0 w-full rounded-b-[1px] bg-[#25b56f]" style={{ height: `${greenHeight}%`, opacity: levelDb > -59.9 ? 0.95 : 0.2 }} />
+          <span className="absolute left-0 w-full bg-[#d8ca72]" style={{ bottom: `${dbToMeterPercent(-12)}%`, height: `${yellowHeight}%`, opacity: yellowHeight > 0 ? 0.95 : 0 }} />
+          <span className="absolute left-0 w-full rounded-t-[1px] bg-[#d95757]" style={{ bottom: `${dbToMeterPercent(-3)}%`, height: `${redHeight}%`, opacity: redHeight > 0 ? 0.95 : 0 }} />
+        </div>
       </div>
-      <div className="text-center font-mono text-[10px] text-text-2">{label}</div>
+      <div className="text-center font-mono text-[9px] text-text-2">{label || formatLevelDb(clampedDb)}</div>
     </div>
   );
+}
+
+function dbToMeterPercent(levelDb: number) {
+  return ((clamp(levelDb, -60, 6) + 60) / 66) * 100;
+}
+
+function dbRangePercent(fromDb: number, toDb: number) {
+  return Math.max(0, dbToMeterPercent(toDb) - dbToMeterPercent(fromDb));
+}
+
+function formatLevelDb(levelDb: number) {
+  if (levelDb <= -59.9) return "-∞";
+  return `${Math.round(levelDb)}`;
 }
 
 function seekFromDrag(

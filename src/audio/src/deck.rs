@@ -207,7 +207,7 @@ impl Deck {
             scrub_active: false,
             scrub_target_frames: 0.0,
             scrub_velocity: 0.0,
-            volume: 0.85,
+            volume: 1.0,
             cue_enabled: false,
             filter: DeckFilter::new(sample_rate),
             eq: ThreeBandEq::new(sample_rate),
@@ -480,8 +480,8 @@ mod tests {
         deck.play();
 
         let frame = deck.next_frame().expect("frame");
-        assert!((frame[0] - 0.2125).abs() < 0.0001);
-        assert!((frame[1] - 0.2125).abs() < 0.0001);
+        assert!((frame[0] - 0.25).abs() < 0.0001);
+        assert!((frame[1] - 0.25).abs() < 0.0001);
         assert!((deck.position_ratio() - 0.0108).abs() < 0.0001);
     }
 

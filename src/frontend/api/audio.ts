@@ -76,6 +76,12 @@ export function audioDeckError(deck: DeckId) {
   return invoke<string | null>("audio_deck_error", { deck });
 }
 
+export function audioDeckLevelDb(deck: DeckId) {
+  if (usesBrowserAudioFixture()) return Promise.resolve(-60);
+
+  return invoke<number>("audio_deck_level_db", { deck });
+}
+
 export function setAudioDeckVolume(deck: DeckId, volume: number) {
   if (usesBrowserAudioFixture()) return Promise.resolve();
 
