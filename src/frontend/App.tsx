@@ -1,17 +1,23 @@
 import { DndContext, DragOverlay, MouseSensor, pointerWithin, useSensor, useSensors, type DragEndEvent, type DragStartEvent } from "@dnd-kit/core";
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { FilterBar } from "./components/FilterBar";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CommandPalette } from "./components/CommandPalette";
+import { DebugWindow, type DebugTab } from "./components/DebugWindow";
 import { Inspector } from "./components/Inspector";
+import { LibraryWorkspace } from "./components/LibraryWorkspace";
 import { PlayerDock } from "./components/PlayerDock";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
-import { TrackTable } from "./components/TrackTable";
-import { audioDeckError, audioDeckLevelDb, audioDeckPosition, endAudioDeckScrub, loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, scrubAudioDeckToPosition, seekAudioDeck, setAudioDeckEq, setAudioDeckFilterAmount, setAudioDeckTempo, setAudioDeckVolume, setAudioMasterVolume, startAudioDeckScrub, usesBrowserAudioFixture, type DeckId } from "./api/audio";
-import { connectController, disconnectController, listControllers, pollControllerEvents, type ControllerAction } from "./api/controller";
+import { TrackDragOverlay } from "./components/TrackDragOverlay";
+import { audioDeckError, audioDeckLevelDb, audioDeckPosition, endAudioDeckScrub, loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, scrubAudioDeckToPosition, seekAudioDeck, setAudioDeckEq, setAudioDeckFilterAmount, setAudioDeckFxChain, setAudioDeckTempo, setAudioDeckVolume, setAudioMasterVolume, startAudioDeckScrub, usesBrowserAudioFixture, type DeckId } from "./api/audio";
+import type { ControllerAction } from "./api/controller";
 import { addRekordboxTracksToPlaylist, createRekordboxPlaylist, loadRekordboxBeatGrid, loadRekordboxLibrary, moveRekordboxPlaylistToFolder } from "./api/rekordbox";
 import { withRekordboxLibrary } from "./data/libraryMapping";
-import { isRecentlyAdded, recentAddedCutoff } from "./data/recentTracks";
-import type { CurrentNode, PcData, PlaylistEntry, SortableTrackKey, SortState, Track } from "./designTypes";
+import type { CurrentNode, PcData, PlaylistEntry, Track } from "./designTypes";
+import { clamp, crossfadeGain, estimatedDeckLevelDb, nextTempoRange, otherDeck, playbackRateFromTempo, sampleEnergyCurve, smoothMeterDb, syncedPositionForDeck, syncedTempoForDeck } from "./lib/audioMath";
+import { CONTROLLER_FX_KINDS, cloneControllerFxState, controllerFxTarget, createControllerFxState, deckIdFromControllerAction, defaultControllerFxSlot, fxKindLabel, fxTargetLabel, sendControllerFxFeedback, wrapIndex, type ControllerFxDebugState, type ControllerFxState } from "./lib/controllerFx";
+import { deckFromDndDropId, deckFromDndTranslatedRect } from "./lib/dnd";
+import { currentNodesEqual, findPlaylist, findPlaylistParentNode, libraryBrowserNodes, movePlaylistEntry, playlistContains, recalculatePlaylistCounts, statusText, updatePlaylistEntries } from "./lib/library";
+import { useControllerPolling } from "./hooks/useControllerPolling";
 
 declare global {
   interface Window {
@@ -21,6 +27,9 @@ declare global {
 
 type EqBand = "high" | "mid" | "low";
 type DeckEq = Record<EqBand, number>;
+type LibraryFocus = "tree" | "tracks";
+
+const CONTROLLER_JOG_SECONDS_PER_TICK = 0.012;
 
 export function App() {
   const mockData = useMemo(() => window.PC_DATA, []);
@@ -52,16 +61,29 @@ export function App() {
   const [deckFilterAmounts, setDeckFilterAmounts] = useState({ A: 0, B: 0 });
   const [deckCuePoints, setDeckCuePoints] = useState({ A: 0, B: 0 });
   const tempoSendTimeouts = useRef<Record<DeckId, number | null>>({ A: null, B: null });
+  const seekSendFrames = useRef<Record<DeckId, number | null>>({ A: null, B: null });
+  const pendingSeekPositions = useRef<Record<DeckId, number>>({ A: 0, B: 0 });
+  const scrubSendFrames = useRef<Record<DeckId, number | null>>({ A: null, B: null });
+  const pendingScrubPositions = useRef<Record<DeckId, number>>({ A: 0, B: 0 });
   const deckPositionsRef = useRef(deckPositions);
   const deckPlayingRef = useRef(deckPlaying);
   const deckTempoRangesRef = useRef(deckTempoRanges);
+  const deckTracksRef = useRef({ A: deckATrack, B: deckBTrack });
+  const controllerJogActiveRef = useRef<Record<DeckId, boolean>>({ A: false, B: false });
+  const controllerJogWasPlayingRef = useRef<Record<DeckId, boolean>>({ A: false, B: false });
+  const controllerFxRef = useRef<ControllerFxState>(createControllerFxState());
+  const [controllerFxDebug, setControllerFxDebug] = useState<ControllerFxDebugState>(() => cloneControllerFxState(controllerFxRef.current));
   const selectedRef = useRef(selected);
+  const currentNodeRef = useRef(currentNode);
+  const libraryFocusRef = useRef<LibraryFocus>("tracks");
+  const libraryTracksRef = useRef<Track[]>([]);
+  const [libraryFocus, setLibraryFocus] = useState<LibraryFocus>("tracks");
   const [loadedDeckPaths, setLoadedDeckPaths] = useState<{ A: string | null; B: string | null }>({ A: null, B: null });
   const [crossfader, setCrossfader] = useState(0);
   const [masterVolume, setMasterVolume] = useState(0.9);
   const [audioStatus, setAudioStatus] = useState("Rust audio engine ready");
-  const [controllerStatus, setControllerStatus] = useState("Controller idle");
-  const handleControllerActionRef = useRef<(action: ControllerAction) => void>(() => undefined);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugTab, setDebugTab] = useState<DebugTab>("midi");
   const [baseTrack, setBaseTrack] = useState<Track | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -104,8 +126,20 @@ export function App() {
   }, [deckTempoRanges]);
 
   useEffect(() => {
+    deckTracksRef.current = { A: deckATrack, B: deckBTrack };
+  }, [deckATrack, deckBTrack]);
+
+  useEffect(() => {
     selectedRef.current = selected;
   }, [selected]);
+
+  useEffect(() => {
+    currentNodeRef.current = currentNode;
+  }, [currentNode]);
+
+  useEffect(() => {
+    libraryFocusRef.current = libraryFocus;
+  }, [libraryFocus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,6 +183,13 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPaletteOpen(true);
+      } else if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        setDebugOpen((open) => !open);
+        setDebugTab("midi");
+      } else if (event.key === "Escape" && debugOpen) {
+        event.preventDefault();
+        setDebugOpen(false);
       } else if (event.key === "/" && !isInput) {
         event.preventDefault();
         document.querySelector<HTMLInputElement>(".fb-search input")?.focus();
@@ -160,7 +201,7 @@ export function App() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [data.TRACKS, selected]);
+  }, [data.TRACKS, debugOpen, selected]);
 
   useEffect(() => {
     if (!deckPlaying.A && !deckPlaying.B) return undefined;
@@ -518,6 +559,93 @@ export function App() {
     loadDeck(deck, track);
   }, [loadDeck, tracksById]);
 
+  const selectLibraryTrack = useCallback((track: Track) => {
+    setSelected(track.id);
+    setMultiSelected(new Set([track.id]));
+    setPreviewTrack(track);
+  }, []);
+
+  const browseLibraryTracks = useCallback((ticks: number) => {
+    const tracks = libraryTracksRef.current;
+    if (tracks.length === 0 || ticks === 0) return;
+
+    const currentIndex = Math.max(0, tracks.findIndex((track) => track.id === selectedRef.current));
+    const nextIndex = clamp(currentIndex + ticks, 0, tracks.length - 1);
+    selectLibraryTrack(tracks[nextIndex]);
+    setLibraryFocus("tracks");
+  }, [selectLibraryTrack]);
+
+  const browseLibraryTree = useCallback((ticks: number) => {
+    if (ticks === 0) return;
+
+    const nodes = libraryBrowserNodes(data);
+    if (nodes.length === 0) return;
+
+    const currentIndex = Math.max(0, nodes.findIndex((entry) => currentNodesEqual(entry.node, currentNodeRef.current)));
+    const nextIndex = clamp(currentIndex + ticks, 0, nodes.length - 1);
+    const nextNode = nodes[nextIndex];
+
+    setCurrentNode(nextNode.node);
+    setLibraryFocus("tree");
+    setControllerStatus(`Library: ${nextNode.label}`);
+  }, [data]);
+
+  const moveLibraryBack = useCallback(() => {
+    if (libraryFocusRef.current === "tracks") {
+      setLibraryFocus("tree");
+      setControllerStatus("Library: tree");
+      return;
+    }
+
+    const current = currentNodeRef.current;
+    if (current.type === "playlist") {
+      const parent = findPlaylistParentNode(data.PLAYLISTS, current.id);
+      setCurrentNode(parent ?? { type: "all" });
+      setControllerStatus(parent ? "Library: parent folder" : "Library: root");
+      return;
+    }
+
+    setCurrentNode({ type: "all" });
+    setControllerStatus("Library: root");
+  }, [data.PLAYLISTS]);
+
+  const enterLibraryNode = useCallback(() => {
+    if (libraryFocusRef.current === "tracks") return;
+
+    const current = currentNodeRef.current;
+    if (current.type === "playlist") {
+      const playlist = findPlaylist(data.PLAYLISTS, current.id);
+      const firstChild = playlist?.children[0];
+      if (playlist?.isFolder && firstChild) {
+        setCurrentNode({ type: "playlist", id: firstChild.id });
+        setControllerStatus(`Library: ${firstChild.name}`);
+        return;
+      }
+    }
+
+    setLibraryFocus("tracks");
+    setControllerStatus("Library: tracks");
+  }, [data.PLAYLISTS]);
+
+  const handleLibraryBrowse = useCallback((ticks: number, shifted: boolean) => {
+    if (shifted) {
+      browseLibraryTree(ticks);
+      return;
+    }
+
+    if (libraryFocusRef.current === "tree") browseLibraryTree(ticks);
+    else browseLibraryTracks(ticks);
+  }, [browseLibraryTracks, browseLibraryTree]);
+
+  const handleLibraryBrowsePress = useCallback((shifted: boolean) => {
+    if (shifted) moveLibraryBack();
+    else enterLibraryNode();
+  }, [enterLibraryNode, moveLibraryBack]);
+
+  const handleVisibleTracksChange = useCallback((tracks: Track[]) => {
+    libraryTracksRef.current = tracks;
+  }, []);
+
   const dndSensors = useSensors(
     useSensor(MouseSensor, {
       activationConstraint: { distance: 6 }
@@ -589,7 +717,13 @@ export function App() {
   const setDeckPosition = useCallback((deck: DeckId, position: number) => {
     deckPositionsRef.current = { ...deckPositionsRef.current, [deck]: position };
     setDeckPositions((current) => ({ ...current, [deck]: position }));
-    seekAudioDeck(deck, position).catch(reportAudioError);
+
+    pendingSeekPositions.current[deck] = position;
+    if (seekSendFrames.current[deck] !== null) return;
+    seekSendFrames.current[deck] = window.requestAnimationFrame(() => {
+      seekSendFrames.current[deck] = null;
+      seekAudioDeck(deck, pendingSeekPositions.current[deck]).catch(reportAudioError);
+    });
   }, [reportAudioError]);
 
   const startDeckScrub = useCallback((deck: DeckId) => {
@@ -602,11 +736,24 @@ export function App() {
   const scrubDeckPosition = useCallback((deck: DeckId, position: number) => {
     deckPositionsRef.current = { ...deckPositionsRef.current, [deck]: position };
     setDeckPositions((current) => ({ ...current, [deck]: position }));
-    scrubAudioDeckToPosition(deck, position).catch(reportAudioError);
+
+    pendingScrubPositions.current[deck] = position;
+    if (scrubSendFrames.current[deck] !== null) return;
+    scrubSendFrames.current[deck] = window.requestAnimationFrame(() => {
+      scrubSendFrames.current[deck] = null;
+      scrubAudioDeckToPosition(deck, pendingScrubPositions.current[deck]).catch(reportAudioError);
+    });
   }, [reportAudioError]);
 
   const endDeckScrub = useCallback((deck: DeckId, resume: boolean) => {
-    endAudioDeckScrub(deck)
+    const pendingFrame = scrubSendFrames.current[deck];
+    if (pendingFrame !== null) {
+      window.cancelAnimationFrame(pendingFrame);
+      scrubSendFrames.current[deck] = null;
+    }
+
+    scrubAudioDeckToPosition(deck, deckPositionsRef.current[deck])
+      .then(() => endAudioDeckScrub(deck))
       .then(async () => {
         if (!resume) return;
 
@@ -704,9 +851,15 @@ export function App() {
 
   useEffect(() => {
     const pending = tempoSendTimeouts.current;
+    const seekFrames = seekSendFrames.current;
+    const scrubFrames = scrubSendFrames.current;
     return () => {
       if (pending.A !== null) window.clearTimeout(pending.A);
       if (pending.B !== null) window.clearTimeout(pending.B);
+      if (seekFrames.A !== null) window.cancelAnimationFrame(seekFrames.A);
+      if (seekFrames.B !== null) window.cancelAnimationFrame(seekFrames.B);
+      if (scrubFrames.A !== null) window.cancelAnimationFrame(scrubFrames.A);
+      if (scrubFrames.B !== null) window.cancelAnimationFrame(scrubFrames.B);
     };
   }, []);
 
@@ -726,6 +879,29 @@ export function App() {
     setDeckFilterAmounts((current) => ({ ...current, [deck]: amount }));
     setAudioDeckFilterAmount(deck, amount).catch(reportAudioError);
   }, [reportAudioError]);
+
+  const sendControllerFxState = useCallback((state: ControllerFxState, target = state.target) => {
+    const effects = state.slots.filter((slot) => slot.enabled).map((slot) => ({ ...slot }));
+    const deckAEffects = target === "A" || target === "both" ? effects : [];
+    const deckBEffects = target === "B" || target === "both" ? effects : [];
+    setAudioDeckFxChain("A", deckAEffects).catch(reportAudioError);
+    setAudioDeckFxChain("B", deckBEffects).catch(reportAudioError);
+  }, [reportAudioError]);
+
+  const updateControllerFxState = useCallback((update: (state: ControllerFxState) => void, send = true) => {
+    const state: ControllerFxState = {
+      ...controllerFxRef.current,
+      slots: controllerFxRef.current.slots.map((slot) => ({ ...slot }))
+    };
+    update(state);
+    state.focusIndex = wrapIndex(state.focusIndex, state.slots.length);
+    controllerFxRef.current = state;
+    setControllerFxDebug(cloneControllerFxState(state));
+    const focusedSlot = state.slots[state.focusIndex];
+    setControllerStatus(`FX ${state.focusIndex + 1}: ${fxKindLabel(focusedSlot.kind)} ${focusedSlot.enabled ? "on" : "off"} · ${fxTargetLabel(state.target)} · ${Math.round(focusedSlot.mix * 100)}%`);
+    sendControllerFxFeedback(state);
+    if (send) sendControllerFxState(state);
+  }, [sendControllerFxState]);
 
   const handleDeckCueAction = useCallback((deck: DeckId) => {
     const playing = deck === "A" ? deckPlaying.A : deckPlaying.B;
@@ -766,6 +942,24 @@ export function App() {
     }
   }, [ensureDeckLoaded, loadAnalysisForTrack, reportAudioError]);
 
+  const moveDeckByJogTicks = useCallback((deck: DeckId, ticks: number) => {
+    if (ticks === 0) return;
+
+    const track = deckTracksRef.current[deck];
+    const position = deckPositionsRef.current[deck];
+    const nextPosition = clamp(
+      position + (ticks * CONTROLLER_JOG_SECONDS_PER_TICK) / Math.max(1, track.totalSec),
+      0,
+      1
+    );
+
+    if (controllerJogActiveRef.current[deck]) {
+      scrubDeckPosition(deck, nextPosition);
+    } else {
+      setDeckPosition(deck, nextPosition);
+    }
+  }, [scrubDeckPosition, setDeckPosition]);
+
   const handleControllerAction = useCallback((action: ControllerAction) => {
     const deck = deckIdFromControllerAction(action);
 
@@ -778,6 +972,12 @@ export function App() {
         break;
       case "loadSelected":
         loadDeckByTrackId(deck, selectedRef.current);
+        break;
+      case "browse":
+        handleLibraryBrowse(action.ticks, action.shifted);
+        break;
+      case "browsePress":
+        if (action.pressed) handleLibraryBrowsePress(action.shifted);
         break;
       case "tempo": {
         const range = deckTempoRangesRef.current[deck];
@@ -797,55 +997,74 @@ export function App() {
         setMixerCrossfader(action.value * 2 - 1);
         break;
       case "hotCue":
+        break;
+      case "fxSelect":
+        if (action.pressed) {
+          updateControllerFxState((state) => {
+            const slot = state.slots[state.focusIndex];
+            const currentKindIndex = CONTROLLER_FX_KINDS.indexOf(slot.kind);
+            const nextKind = CONTROLLER_FX_KINDS[wrapIndex(currentKindIndex + action.direction, CONTROLLER_FX_KINDS.length)];
+            state.slots[state.focusIndex] = {
+              ...defaultControllerFxSlot(nextKind),
+              enabled: slot.enabled,
+              mix: slot.mix
+            };
+          });
+        }
+        break;
+      case "fxFocus":
+        if (action.pressed) {
+          updateControllerFxState((state) => {
+            state.focusIndex += action.direction;
+          }, false);
+        }
+        break;
+      case "fxTarget":
+        updateControllerFxState((state) => {
+          state.target = controllerFxTarget(action.target);
+        });
+        break;
+      case "fxDepth":
+        updateControllerFxState((state) => {
+          state.slots[state.focusIndex].mix = clamp(action.value, 0, 1);
+        });
+        break;
+      case "fxToggle":
+        if (action.pressed) {
+          updateControllerFxState((state) => {
+            const slot = state.slots[state.focusIndex];
+            slot.enabled = !slot.enabled;
+          });
+        }
+        break;
+      case "fxClear":
+        if (action.pressed) {
+          updateControllerFxState((state) => {
+            state.slots.forEach((slot) => {
+              slot.enabled = false;
+            });
+          });
+        }
+        break;
+      case "jogTouch":
+        if (action.pressed) {
+          controllerJogActiveRef.current[deck] = true;
+          controllerJogWasPlayingRef.current[deck] = deckPlayingRef.current[deck];
+          startDeckScrub(deck);
+        } else {
+          controllerJogActiveRef.current[deck] = false;
+          endDeckScrub(deck, controllerJogWasPlayingRef.current[deck]);
+        }
+        break;
       case "jog":
+        moveDeckByJogTicks(deck, action.ticks);
+        break;
       case "raw":
         break;
     }
-  }, [handleDeckCueAction, loadDeckByTrackId, setDeckEq, setDeckFilter, setDeckPlayback, setDeckTempo, setDeckVolume, setMixerCrossfader]);
+  }, [endDeckScrub, handleDeckCueAction, handleLibraryBrowse, handleLibraryBrowsePress, loadDeckByTrackId, moveDeckByJogTicks, setDeckEq, setDeckFilter, setDeckPlayback, setDeckTempo, setDeckVolume, setMixerCrossfader, startDeckScrub, updateControllerFxState]);
 
-  useEffect(() => {
-    handleControllerActionRef.current = handleControllerAction;
-  }, [handleControllerAction]);
-
-  useEffect(() => {
-    if (usesBrowserAudioFixture()) return undefined;
-
-    let cancelled = false;
-    let pollInterval: number | null = null;
-
-    listControllers()
-      .then((devices) => {
-        if (cancelled) return;
-        const target = devices.find((device) => device.kind === "pioneerDdjFlx4") ?? devices[0];
-        if (!target) {
-          setControllerStatus("No controller");
-          return null;
-        }
-
-        setControllerStatus(`Connecting ${target.name}...`);
-        return connectController(target.id);
-      })
-      .then((device) => {
-        if (cancelled || !device) return;
-        setControllerStatus(`Connected ${device.name}`);
-        pollInterval = window.setInterval(() => {
-          pollControllerEvents()
-            .then((events) => {
-              events.forEach((event) => handleControllerActionRef.current(event.action));
-            })
-            .catch((error) => setControllerStatus(error instanceof Error ? error.message : String(error)));
-        }, 16);
-      })
-      .catch((error) => {
-        if (!cancelled) setControllerStatus(error instanceof Error ? error.message : String(error));
-      });
-
-    return () => {
-      cancelled = true;
-      if (pollInterval !== null) window.clearInterval(pollInterval);
-      disconnectController().catch(() => undefined);
-    };
-  }, []);
+  const { clearMidiDebugEvents, controllerStatus, midiDebugEvents, setControllerStatus } = useControllerPolling(handleControllerAction);
 
   useEffect(() => {
     if (libraryStatus !== "rekordbox") return undefined;
@@ -896,6 +1115,7 @@ export function App() {
           <Sidebar
             data={data}
             currentNode={currentNode}
+            focused={libraryFocus === "tree"}
             setCurrentNode={setCurrentNode}
             onDropToCrate={onDropToCrate}
             onCreatePlaylist={createPlaylist}
@@ -912,8 +1132,10 @@ export function App() {
             filterQuery={filterQuery}
             hoveredId={hoveredId}
             libraryWriteStatus={libraryWriteStatus}
+            libraryFocused={libraryFocus === "tracks"}
             multiSelected={multiSelected}
             onPreview={onPreview}
+            onVisibleTracksChange={handleVisibleTracksChange}
             selected={selected}
             setBaseTrack={setBaseTrack}
             setFilterQuery={setFilterQuery}
@@ -949,6 +1171,7 @@ export function App() {
             <Sidebar
               data={data}
               currentNode={currentNode}
+              focused={libraryFocus === "tree"}
               setCurrentNode={setCurrentNode}
               onDropToCrate={onDropToCrate}
               onCreatePlaylist={createPlaylist}
@@ -965,8 +1188,10 @@ export function App() {
               filterQuery={filterQuery}
               hoveredId={hoveredId}
               libraryWriteStatus={libraryWriteStatus}
+              libraryFocused={libraryFocus === "tracks"}
               multiSelected={multiSelected}
               onPreview={onPreview}
+              onVisibleTracksChange={handleVisibleTracksChange}
               selected={selected}
               setBaseTrack={setBaseTrack}
               setFilterQuery={setFilterQuery}
@@ -978,34 +1203,28 @@ export function App() {
         </div>
       )}
       {paletteOpen && (
-        <div className="fixed inset-0 z-20 flex items-start justify-center bg-black/40 pt-[72px]" onClick={() => setPaletteOpen(false)}>
-          <div className="w-[560px] overflow-hidden rounded-md border border-line-2 bg-surface-1 shadow-[0_24px_80px_rgba(0,0,0,0.5)]" onClick={(event) => event.stopPropagation()}>
-            <input
-              autoFocus
-              className="w-full border-b border-line bg-transparent px-3.5 py-3 text-[13px]"
-              placeholder="Search library, jump to crate, run command..."
-              value={paletteQuery}
-              onChange={(event) => setPaletteQuery(event.target.value)}
-            />
-            <div className="grid p-1.5">
-              {data.TRACKS.slice(0, 6).map((track) => (
-                <button
-                  key={track.id}
-                  className="flex justify-between rounded px-2 py-2 text-left hover:bg-surface-3"
-                  type="button"
-                  onClick={() => {
-                    setPreviewTrack(track);
-                    setSelected(track.id);
-                    setPaletteOpen(false);
-                  }}
-                >
-                  <span>{track.title}</span>
-                  <span className="font-mono text-[11px] text-text-3">{track.artist}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
+        <CommandPalette
+          query={paletteQuery}
+          tracks={data.TRACKS}
+          onClose={() => setPaletteOpen(false)}
+          onQueryChange={setPaletteQuery}
+          onSelectTrack={(track) => {
+            setPreviewTrack(track);
+            setSelected(track.id);
+            setPaletteOpen(false);
+          }}
+        />
+      )}
+      {debugOpen && (
+        <DebugWindow
+          activeTab={debugTab}
+          controllerStatus={controllerStatus}
+          fxState={controllerFxDebug}
+          midiEvents={midiDebugEvents}
+          onClearMidi={clearMidiDebugEvents}
+          onClose={() => setDebugOpen(false)}
+          onSetTab={setDebugTab}
+        />
       )}
       <DragOverlay dropAnimation={null}>
         {activeDragTrack && <TrackDragOverlay track={activeDragTrack} />}
@@ -1013,422 +1232,4 @@ export function App() {
     </div>
     </DndContext>
   );
-}
-
-function sampleEnergyCurve(waveform: Array<[number, number]>, count: number) {
-  if (waveform.length === 0) return [];
-
-  return Array.from({ length: count }, (_, index) => {
-    const ratio = count === 1 ? 0 : index / (count - 1);
-    const sampleIndex = Math.min(waveform.length - 1, Math.round(ratio * (waveform.length - 1)));
-    return waveform[sampleIndex]?.[1] ?? 0;
-  });
-}
-
-function crossfadeGain(deck: DeckId, crossfader: number) {
-  const value = Math.max(-1, Math.min(1, crossfader));
-  if (deck === "A") return value <= 0 ? 1 : 1 - value;
-  return value >= 0 ? 1 : 1 + value;
-}
-
-function playbackRateFromTempo(tempoPercent: number) {
-  return Math.max(0.05, 1 + tempoPercent / 100);
-}
-
-function estimatedDeckLevelDb(track: Track, position: number, volume: number, crossfade: number) {
-  if (track.waveform.length === 0 || volume <= 0 || crossfade <= 0) return -60;
-
-  const sampleIndex = Math.min(track.waveform.length - 1, Math.max(0, Math.round(position * (track.waveform.length - 1))));
-  const peak = (track.waveform[sampleIndex]?.[1] ?? 0) * volume * crossfade;
-  if (peak <= 0.000_001) return -60;
-
-  return Math.max(-60, Math.min(6, 20 * Math.log10(peak)));
-}
-
-function smoothMeterDb(currentDb: number, targetDb: number) {
-  const current = Number.isFinite(currentDb) ? currentDb : -60;
-  const target = Number.isFinite(targetDb) ? targetDb : -60;
-  const coefficient = target > current ? 0.55 : 0.18;
-
-  return current + (target - current) * coefficient;
-}
-
-function TrackDragOverlay({ track }: { track: Track }) {
-  return (
-    <div className="pointer-events-none grid h-[30px] w-[560px] max-w-[70vw] grid-cols-[minmax(0,1fr)_110px_58px] items-center gap-3 rounded-sm border border-accent/70 bg-surface-2 px-3 text-[12px] text-text-1 shadow-[0_10px_40px_rgba(0,0,0,0.45)]">
-      <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-semibold">{track.title}</span>
-      <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-text-2">{track.artist}</span>
-      <span className="text-right font-mono text-[11px] text-accent">{track.bpm > 0 ? track.bpm.toFixed(1) : "--"}</span>
-    </div>
-  );
-}
-
-function otherDeck(deck: DeckId): DeckId {
-  return deck === "A" ? "B" : "A";
-}
-
-function deckIdFromControllerAction(action: ControllerAction): DeckId {
-  return "deck" in action && action.deck === "b" ? "B" : "A";
-}
-
-function deckFromDndDropId(id: string): DeckId | null {
-  if (id.startsWith("deck:A")) return "A";
-  if (id.startsWith("deck:B")) return "B";
-  return null;
-}
-
-function deckFromDndTranslatedRect(event: DragEndEvent): DeckId | null {
-  const translated = event.active.rect.current.translated;
-  if (!translated) return null;
-
-  const dock = document.querySelector<HTMLElement>("[data-player-dock-drop-region]");
-  if (!dock) return null;
-
-  const bounds = dock.getBoundingClientRect();
-  const centerX = translated.left + translated.width / 2;
-  const centerY = translated.top + translated.height / 2;
-  if (centerX < bounds.left || centerX > bounds.right || centerY < bounds.top || centerY > bounds.bottom) {
-    return null;
-  }
-
-  const waveformBottom = bounds.top + bounds.height * 0.42;
-  if (centerY < waveformBottom) {
-    const waveformMid = bounds.top + (waveformBottom - bounds.top) / 2;
-    return centerY < waveformMid ? "A" : "B";
-  }
-
-  return centerX < bounds.left + bounds.width / 2 ? "A" : "B";
-}
-
-function nextTempoRange(currentRange: number) {
-  if (currentRange === 6) return 10;
-  if (currentRange === 10) return 16;
-  return 6;
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function syncedTempoForDeck(
-  follower: DeckId,
-  master: DeckId,
-  deckATrack: Track,
-  deckBTrack: Track,
-  deckTempos: Record<DeckId, number>
-) {
-  const masterTrack = master === "A" ? deckATrack : deckBTrack;
-  const followerTrack = follower === "A" ? deckATrack : deckBTrack;
-  if (masterTrack.bpm <= 0 || followerTrack.bpm <= 0) return null;
-
-  const masterBpm = masterTrack.bpm * playbackRateFromTempo(deckTempos[master]);
-  return ((masterBpm / followerTrack.bpm) - 1) * 100;
-}
-
-function syncedPositionForDeck(
-  follower: DeckId,
-  master: DeckId,
-  deckATrack: Track,
-  deckBTrack: Track,
-  deckPositions: Record<DeckId, number>
-) {
-  const masterTrack = master === "A" ? deckATrack : deckBTrack;
-  const followerTrack = follower === "A" ? deckATrack : deckBTrack;
-  const masterPositionSec = deckPositions[master] * masterTrack.totalSec;
-  const followerPositionSec = deckPositions[follower] * followerTrack.totalSec;
-  const masterPhase = beatPhaseAt(masterTrack, masterPositionSec);
-  const followerSegment = beatSegmentAt(followerTrack, followerPositionSec);
-  const nextFollowerSec = followerSegment.startSec + masterPhase * followerSegment.spanSec;
-
-  return clamp(nextFollowerSec / followerTrack.totalSec, 0, 1);
-}
-
-function beatPhaseAt(track: Track, positionSec: number) {
-  const segment = beatSegmentAt(track, positionSec);
-  return clamp((positionSec - segment.startSec) / segment.spanSec, 0, 1);
-}
-
-function beatSegmentAt(track: Track, positionSec: number) {
-  const beatGrid = track.beatGrid ?? [];
-  if (beatGrid.length >= 2) {
-    const nextIndex = beatGrid.findIndex((beat) => beat.timeSec > positionSec);
-    const currentIndex = Math.max(0, nextIndex === -1 ? beatGrid.length - 2 : nextIndex - 1);
-    const current = beatGrid[currentIndex];
-    const next = beatGrid[Math.min(beatGrid.length - 1, currentIndex + 1)];
-    return {
-      startSec: current.timeSec,
-      spanSec: Math.max(0.001, next.timeSec - current.timeSec)
-    };
-  }
-
-  const spanSec = track.bpm > 0 ? 60 / track.bpm : 0.5;
-  return {
-    startSec: Math.floor(positionSec / spanSec) * spanSec,
-    spanSec
-  };
-}
-
-function LibraryWorkspace({
-  baseTrack,
-  crateMembership,
-  currentNode,
-  data,
-  filterQuery,
-  hoveredId,
-  libraryWriteStatus,
-  multiSelected,
-  onPreview,
-  selected,
-  setBaseTrack,
-  setFilterQuery,
-  setHoveredId,
-  setMultiSelected,
-  setSelected
-}: {
-  baseTrack: Track | null;
-  crateMembership: Record<string, Set<string>>;
-  currentNode: CurrentNode;
-  data: PcData;
-  filterQuery: string;
-  hoveredId: string | null;
-  libraryWriteStatus: string | null;
-  multiSelected: Set<string>;
-  onPreview: (track: Track, play?: boolean) => void;
-  selected: string;
-  setBaseTrack: (track: Track | null) => void;
-  setFilterQuery: (query: string) => void;
-  setHoveredId: (id: string | null) => void;
-  setMultiSelected: Dispatch<SetStateAction<Set<string>>>;
-  setSelected: (id: string) => void;
-}) {
-  const [sort, setSort] = useState<SortState>({ col: "added", dir: "desc" });
-  const recentCutoff = useMemo(() => recentAddedCutoff(data.TRACKS), [data.TRACKS]);
-  const recentTracks = useMemo(() => data.TRACKS.filter((track) => isRecentlyAdded(track, recentCutoff)), [data.TRACKS, recentCutoff]);
-  const fiveStarTracks = useMemo(() => data.TRACKS.filter((track) => track.rating === 5), [data.TRACKS]);
-  const historyTracks = useMemo(() => data.TRACKS.filter((track) => track.plays > 0), [data.TRACKS]);
-  const tracksById = useMemo(() => new Map(data.TRACKS.map((track) => [track.id, track])), [data.TRACKS]);
-  const playlistsById = useMemo(() => indexPlaylists(data.PLAYLISTS), [data.PLAYLISTS]);
-  const sortedAllTracks = useMemo(() => sortTracks(data.TRACKS, sort), [data.TRACKS, sort]);
-  const sortedRecentTracks = useMemo(() => sortTracks(recentTracks, sort), [recentTracks, sort]);
-  const sortedFiveStarTracks = useMemo(() => sortTracks(fiveStarTracks, sort), [fiveStarTracks, sort]);
-  const sortedHistoryTracks = useMemo(() => sortTracks(historyTracks, sort), [historyTracks, sort]);
-
-  const visibleTracks = useMemo(() => {
-    let list: Track[];
-
-    if (currentNode.type === "all") {
-      list = sortedAllTracks;
-    } else if (currentNode.type === "recent") {
-      list = sortedRecentTracks;
-    } else if (currentNode.type === "fivestar") {
-      list = sortedFiveStarTracks;
-    } else if (currentNode.type === "history") {
-      list = sortedHistoryTracks;
-    } else if (currentNode.type === "crate") {
-      const ids = crateMembership[currentNode.id] ?? new Set<string>();
-      list = sortTracks(mapTrackIds(ids, tracksById), sort);
-    } else if (currentNode.type === "playlist") {
-      const playlist = playlistsById.get(currentNode.id);
-      list = sortTracks(mapTrackIds(playlist ? collectPlaylistTrackIds(playlist) : [], tracksById), sort);
-    } else if (currentNode.type === "smart") {
-      if (currentNode.id === "sm_1") list = sortedFiveStarTracks;
-      else if (currentNode.id === "sm_2") list = sortTracks(data.TRACKS.filter((track) => !track.analyzed), sort);
-      else if (currentNode.id === "sm_3") list = sortTracks(data.TRACKS.filter((track) => track.bpm >= 120 && track.bpm <= 126 && track.key.endsWith("A")), sort);
-      else if (currentNode.id === "sm_4") list = sortTracks(data.TRACKS.filter((track) => track.plays < 5), sort);
-      else list = [];
-    } else if (currentNode.type === "tag") {
-      list = sortTracks(data.TRACKS.filter((track) => track.tags.includes(currentNode.id)), sort);
-    } else {
-      list = sortedAllTracks;
-    }
-
-    if (filterQuery.trim()) {
-      const query = filterQuery.toLowerCase().trim();
-      list = list.filter((track) =>
-        [track.title, track.artist, track.album, track.genre, track.key, ...track.tags].some((value) =>
-          value.toLowerCase().includes(query)
-        )
-      );
-    }
-
-    return list;
-  }, [crateMembership, currentNode, data.TRACKS, filterQuery, playlistsById, sort, sortedAllTracks, sortedFiveStarTracks, sortedHistoryTracks, sortedRecentTracks, tracksById]);
-
-  const finalTracks = useMemo(() => {
-    if (!baseTrack) return visibleTracks;
-
-    return [...visibleTracks].sort((a, b) => {
-      const aCompat = data.compatibleKeys(baseTrack.key).has(a.key) ? 0 : 1;
-      const bCompat = data.compatibleKeys(baseTrack.key).has(b.key) ? 0 : 1;
-      if (aCompat !== bCompat) return aCompat - bCompat;
-      return Math.abs(a.bpm - baseTrack.bpm) - Math.abs(b.bpm - baseTrack.bpm);
-    });
-  }, [baseTrack, data, visibleTracks]);
-
-  const currentNodeLabel = useMemo(() => {
-    if (currentNode.type === "all") return "All Tracks";
-    if (currentNode.type === "recent") return "Recently Added";
-    if (currentNode.type === "fivestar") return "5-Star";
-    if (currentNode.type === "history") return "History";
-    if (currentNode.type === "crate") return data.CRATES.find((crate) => crate.id === currentNode.id)?.name ?? "Crate";
-    if (currentNode.type === "playlist") return findPlaylist(data.PLAYLISTS, currentNode.id)?.name ?? "Playlist";
-    if (currentNode.type === "smart") return data.SMART.find((smart) => smart.id === currentNode.id)?.name ?? "Smart List";
-    if (currentNode.type === "tag") return `#${currentNode.id}`;
-    return "—";
-  }, [currentNode, data]);
-
-  return (
-    <section className="grid min-h-0 min-w-0 grid-rows-[32px_minmax(0,1fr)_22px] border-x border-line bg-bg">
-      <FilterBar
-        count={finalTracks.length}
-        total={data.TRACKS.length}
-        query={filterQuery}
-        setQuery={setFilterQuery}
-        sort={sort}
-        baseTrack={baseTrack}
-        setBaseTrack={setBaseTrack}
-        currentNodeLabel={currentNodeLabel}
-      />
-      <TrackTable
-        tracks={finalTracks}
-        sort={sort}
-        setSort={setSort}
-        selected={selected}
-        setSelected={setSelected}
-        multiSelected={multiSelected}
-        setMultiSelected={setMultiSelected}
-        hoveredId={hoveredId}
-        setHoveredId={setHoveredId}
-        onPreview={onPreview}
-        baseTrack={baseTrack}
-      />
-      <div className="flex h-[22px] items-center justify-between border-t border-line bg-surface-1 px-3 font-mono text-[10px] text-text-2">
-        <span><span className="rounded-[3px] border border-line-2 bg-surface-1 px-1 py-0 text-[9px] text-text-2">B</span> set selected as base · <span className="rounded-[3px] border border-line-2 bg-surface-1 px-1 py-0 text-[9px] text-text-2">⌘K</span> palette · <span className="rounded-[3px] border border-line-2 bg-surface-1 px-1 py-0 text-[9px] text-text-2">/</span> filter · <span className="rounded-[3px] border border-line-2 bg-surface-1 px-1 py-0 text-[9px] text-text-2">drag</span> to crate or playlist</span>
-        <span>{libraryWriteStatus ?? (multiSelected.size > 1 ? `${multiSelected.size} selected` : "")}</span>
-      </div>
-    </section>
-  );
-}
-
-function findPlaylist(playlists: PlaylistEntry[], id: string): PlaylistEntry | null {
-  for (const playlist of playlists) {
-    if (playlist.id === id) return playlist;
-    const child = findPlaylist(playlist.children, id);
-    if (child) return child;
-  }
-  return null;
-}
-
-function collectPlaylistTrackIds(playlist: PlaylistEntry): string[] {
-  return [
-    ...playlist.trackIds,
-    ...playlist.children.flatMap((child) => collectPlaylistTrackIds(child))
-  ];
-}
-
-function indexPlaylists(playlists: PlaylistEntry[]) {
-  const index = new Map<string, PlaylistEntry>();
-  const visit = (playlist: PlaylistEntry) => {
-    index.set(playlist.id, playlist);
-    playlist.children.forEach(visit);
-  };
-  playlists.forEach(visit);
-  return index;
-}
-
-function updatePlaylistEntries(
-  playlists: PlaylistEntry[],
-  playlistId: string,
-  update: (playlist: PlaylistEntry) => PlaylistEntry
-): PlaylistEntry[] {
-  return playlists.map((playlist) => {
-    if (playlist.id === playlistId) return update(playlist);
-    if (playlist.children.length === 0) return playlist;
-    return {
-      ...playlist,
-      children: updatePlaylistEntries(playlist.children, playlistId, update)
-    };
-  });
-}
-
-function playlistContains(playlist: PlaylistEntry, id: string): boolean {
-  return playlist.children.some((child) => child.id === id || playlistContains(child, id));
-}
-
-function movePlaylistEntry(playlists: PlaylistEntry[], playlistId: string, folderId: string): PlaylistEntry[] | null {
-  const remove = (items: PlaylistEntry[]): { items: PlaylistEntry[]; removed: PlaylistEntry | null } => {
-    let removed: PlaylistEntry | null = null;
-    const next = items.flatMap((item) => {
-      if (item.id === playlistId) {
-        removed = item;
-        return [];
-      }
-      if (item.children.length === 0) return [item];
-      const childResult = remove(item.children);
-      if (childResult.removed) removed = childResult.removed;
-      return [{ ...item, children: childResult.items }];
-    });
-    return { items: next, removed };
-  };
-
-  const insert = (items: PlaylistEntry[], playlist: PlaylistEntry): PlaylistEntry[] => {
-    return items.map((item) => {
-      if (item.id === folderId && item.isFolder) {
-        return { ...item, children: [...item.children, playlist] };
-      }
-      if (item.children.length === 0) return item;
-      return { ...item, children: insert(item.children, playlist) };
-    });
-  };
-
-  const { items, removed } = remove(playlists);
-  return removed ? insert(items, removed) : null;
-}
-
-function recalculatePlaylistCounts(playlists: PlaylistEntry[]): PlaylistEntry[] {
-  return playlists.map((playlist) => {
-    const children = recalculatePlaylistCounts(playlist.children);
-    return {
-      ...playlist,
-      children,
-      count: playlist.trackIds.length + children.reduce((total, child) => total + child.count, 0)
-    };
-  });
-}
-
-function mapTrackIds(ids: Iterable<string>, tracksById: Map<string, Track>) {
-  const tracks: Track[] = [];
-  for (const id of ids) {
-    const track = tracksById.get(id);
-    if (track) tracks.push(track);
-  }
-  return tracks;
-}
-
-function sortTracks(tracks: Track[], sort: SortState) {
-  return [...tracks].sort(trackComparator(sort.col, sort.dir));
-}
-
-function trackComparator(column: SortableTrackKey, direction: "asc" | "desc") {
-  const multiplier = direction === "asc" ? 1 : -1;
-
-  return (a: Track, b: Track) => {
-    const aValue = a.sortKeys?.[column] ?? (column === "duration" ? a.totalSec : a[column]);
-    const bValue = b.sortKeys?.[column] ?? (column === "duration" ? b.totalSec : b[column]);
-
-    if (typeof aValue === "number" && typeof bValue === "number") {
-      return (aValue - bValue) * multiplier;
-    }
-
-    if (aValue < bValue) return -1 * multiplier;
-    if (aValue > bValue) return 1 * multiplier;
-    return 0;
-  };
-}
-
-function statusText(status: "loading" | "rekordbox" | "mock" | "error", count: number, error: string | null) {
-  if (status === "loading") return "Loading Rekordbox library…";
-  if (status === "rekordbox") return `${count.toLocaleString()} tracks loaded from Rekordbox`;
-  if (status === "error") return `Rekordbox load failed: ${error ?? "unknown error"}`;
-  return "Using mock library";
 }

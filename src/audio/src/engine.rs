@@ -1,12 +1,12 @@
 use std::path::Path;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 
-use crate::deck::Deck;
+use crate::deck::{Deck, DeckFxConfig};
 use crate::decoder::{decode_file, decode_file_to_sender, validate_file, DecodeMessage};
 
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +35,7 @@ impl DeckId {
 pub struct AudioEngine {
     state: Arc<Mutex<MixerState>>,
     commands: Sender<AudioCommand>,
+    shutdown: Sender<()>,
     sample_rate: u32,
 }
 
@@ -53,6 +54,7 @@ impl AudioEngine {
         let config = supported_config.config();
         let sample_format = supported_config.sample_format();
         let (command_sender, command_receiver) = mpsc::channel::<AudioCommand>();
+        let (shutdown_sender, shutdown_receiver) = mpsc::channel::<()>();
         let (init_sender, init_receiver) = mpsc::channel::<Result<(), String>>();
         let thread_state = state.clone();
 
@@ -60,15 +62,27 @@ impl AudioEngine {
             .name("playcircle-audio".to_string())
             .spawn(move || {
                 let stream = match sample_format {
-                    SampleFormat::F32 => {
-                        build_stream::<f32>(&device, &config, channels, thread_state.clone())
-                    }
-                    SampleFormat::I16 => {
-                        build_stream::<i16>(&device, &config, channels, thread_state.clone())
-                    }
-                    SampleFormat::U16 => {
-                        build_stream::<u16>(&device, &config, channels, thread_state.clone())
-                    }
+                    SampleFormat::F32 => build_stream::<f32>(
+                        &device,
+                        &config,
+                        channels,
+                        thread_state.clone(),
+                        command_receiver,
+                    ),
+                    SampleFormat::I16 => build_stream::<i16>(
+                        &device,
+                        &config,
+                        channels,
+                        thread_state.clone(),
+                        command_receiver,
+                    ),
+                    SampleFormat::U16 => build_stream::<u16>(
+                        &device,
+                        &config,
+                        channels,
+                        thread_state.clone(),
+                        command_receiver,
+                    ),
                     sample_format => Err(format!(
                         "unsupported output sample format: {sample_format:?}"
                     )),
@@ -89,13 +103,7 @@ impl AudioEngine {
                 }
 
                 let _ = init_sender.send(Ok(()));
-                while let Ok(command) = command_receiver.recv() {
-                    let Ok(mut state) = thread_state.lock() else {
-                        continue;
-                    };
-                    state.apply(command);
-                }
-
+                let _ = shutdown_receiver.recv();
                 drop(stream);
             })
             .map_err(|error| format!("failed to spawn audio thread: {error}"))?;
@@ -107,6 +115,7 @@ impl AudioEngine {
         Ok(Self {
             state,
             commands: command_sender,
+            shutdown: shutdown_sender,
             sample_rate,
         })
     }
@@ -181,6 +190,22 @@ impl AudioEngine {
         self.send(AudioCommand::DeckCue { deck, enabled })
     }
 
+    pub fn set_deck_fx_chain(
+        &self,
+        deck: DeckId,
+        effects: Vec<DeckFxConfig>,
+    ) -> Result<(), String> {
+        self.send(AudioCommand::DeckFxChain { deck, effects })
+    }
+
+    pub fn add_deck_fx(&self, deck: DeckId, effect: DeckFxConfig) -> Result<(), String> {
+        self.send(AudioCommand::DeckFxAdd { deck, effect })
+    }
+
+    pub fn clear_deck_fx(&self, deck: DeckId) -> Result<(), String> {
+        self.send(AudioCommand::DeckFxClear { deck })
+    }
+
     pub fn set_master_volume(&self, volume: f32) -> Result<(), String> {
         self.send(AudioCommand::MasterVolume { volume })
     }
@@ -215,6 +240,12 @@ impl AudioEngine {
         self.commands
             .send(command)
             .map_err(|_| "audio engine command thread stopped".to_string())
+    }
+}
+
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(());
     }
 }
 
@@ -273,6 +304,17 @@ enum AudioCommand {
     DeckCue {
         deck: DeckId,
         enabled: bool,
+    },
+    DeckFxChain {
+        deck: DeckId,
+        effects: Vec<DeckFxConfig>,
+    },
+    DeckFxAdd {
+        deck: DeckId,
+        effect: DeckFxConfig,
+    },
+    DeckFxClear {
+        deck: DeckId,
     },
     MasterVolume {
         volume: f32,
@@ -383,6 +425,11 @@ impl MixerState {
             AudioCommand::DeckCue { deck, enabled } => {
                 self.decks[deck.index()].set_cue_enabled(enabled)
             }
+            AudioCommand::DeckFxChain { deck, effects } => {
+                self.decks[deck.index()].set_fx_chain(effects)
+            }
+            AudioCommand::DeckFxAdd { deck, effect } => self.decks[deck.index()].add_fx(effect),
+            AudioCommand::DeckFxClear { deck } => self.decks[deck.index()].clear_fx(),
             AudioCommand::MasterVolume { volume } => {
                 self.master_volume = volume.clamp(0.0, 1.5);
             }
@@ -431,6 +478,7 @@ fn build_stream<T>(
     config: &StreamConfig,
     channels: usize,
     state: Arc<Mutex<MixerState>>,
+    commands: Receiver<AudioCommand>,
 ) -> Result<Stream, String>
 where
     T: Sample + SizedSample + FromSample<f32>,
@@ -438,15 +486,19 @@ where
     device
         .build_output_stream(
             config,
-            move |output: &mut [T], _| write_output(output, channels, &state),
+            move |output: &mut [T], _| write_output(output, channels, &state, &commands),
             move |error| eprintln!("playcircle audio stream error: {error}"),
             None,
         )
         .map_err(|error| format!("failed to build output stream: {error}"))
 }
 
-fn write_output<T>(output: &mut [T], channels: usize, state: &Arc<Mutex<MixerState>>)
-where
+fn write_output<T>(
+    output: &mut [T],
+    channels: usize,
+    state: &Arc<Mutex<MixerState>>,
+    commands: &Receiver<AudioCommand>,
+) where
     T: Sample + FromSample<f32>,
 {
     let Ok(mut state) = state.try_lock() else {
@@ -455,6 +507,10 @@ where
         }
         return;
     };
+
+    while let Ok(command) = commands.try_recv() {
+        state.apply(command);
+    }
 
     for frame in output.chunks_mut(channels) {
         let mixed = state.next_master_frame();

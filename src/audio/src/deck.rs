@@ -182,6 +182,7 @@ pub struct Deck {
     total_frames: Option<u64>,
     played_frames: f64,
     playback_rate: f64,
+    sample_rate: f64,
     playing: bool,
     scrub_active: bool,
     scrub_target_frames: f64,
@@ -190,6 +191,7 @@ pub struct Deck {
     cue_enabled: bool,
     filter: DeckFilter,
     eq: ThreeBandEq,
+    fx: FxChain,
     decoder: Option<Receiver<DecodeMessage>>,
     decoder_finished: bool,
     decoder_error: Option<String>,
@@ -203,6 +205,7 @@ impl Deck {
             total_frames: None,
             played_frames: 0.0,
             playback_rate: 1.0,
+            sample_rate: sample_rate.max(1.0) as f64,
             playing: false,
             scrub_active: false,
             scrub_target_frames: 0.0,
@@ -211,6 +214,7 @@ impl Deck {
             cue_enabled: false,
             filter: DeckFilter::new(sample_rate),
             eq: ThreeBandEq::new(sample_rate),
+            fx: FxChain::new(sample_rate),
             decoder: None,
             decoder_finished: true,
             decoder_error: None,
@@ -218,8 +222,10 @@ impl Deck {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0) as f64;
         self.filter.set_sample_rate(sample_rate);
         self.eq.set_sample_rate(sample_rate);
+        self.fx.set_sample_rate(sample_rate);
     }
 
     pub fn load(&mut self, samples: Vec<[f32; 2]>) {
@@ -233,6 +239,7 @@ impl Deck {
         self.playing = false;
         self.filter.clear();
         self.eq.clear();
+        self.fx.clear();
         self.decoder = None;
         self.decoder_finished = true;
         self.decoder_error = None;
@@ -249,6 +256,7 @@ impl Deck {
         self.playing = false;
         self.filter.clear();
         self.eq.clear();
+        self.fx.clear();
         self.decoder = Some(decoder);
         self.decoder_finished = false;
         self.decoder_error = None;
@@ -280,8 +288,7 @@ impl Deck {
 
         self.scrub_active = true;
         self.scrub_target_frames = target_frame;
-        self.scrub_velocity = (delta * 0.075).clamp(-24.0, 24.0);
-        self.played_frames = target_frame;
+        self.scrub_velocity = self.scrub_velocity_for_delta(delta);
     }
 
     pub fn end_scrub(&mut self) {
@@ -298,6 +305,7 @@ impl Deck {
         self.played_frames = target_frame.min(max_playable_frame as f64);
         self.filter.clear();
         self.eq.clear();
+        self.fx.clear();
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -318,6 +326,18 @@ impl Deck {
 
     pub fn set_eq(&mut self, high: f32, mid: f32, low: f32) {
         self.eq.set_gains(high, mid, low);
+    }
+
+    pub fn set_fx_chain(&mut self, effects: Vec<DeckFxConfig>) {
+        self.fx.set_effects(effects);
+    }
+
+    pub fn add_fx(&mut self, effect: DeckFxConfig) {
+        self.fx.add_effect(effect);
+    }
+
+    pub fn clear_fx(&mut self) {
+        self.fx.clear_effects();
     }
 
     pub fn set_cue_enabled(&mut self, enabled: bool) {
@@ -362,21 +382,17 @@ impl Deck {
         ];
 
         if self.scrub_active && !self.playing {
-            let distance = self.scrub_target_frames - self.played_frames;
-            if distance.abs() > 0.5 {
-                self.played_frames += distance.clamp(-24.0, 24.0);
-            } else {
-                self.played_frames += self.scrub_velocity;
-            }
+            self.played_frames += self.scrub_velocity;
             self.played_frames = self
                 .played_frames
                 .clamp(0.0, self.seekable_frames().saturating_sub(1) as f64);
-            self.scrub_velocity *= 0.992;
+            self.scrub_velocity *= 0.99995;
         } else {
             self.played_frames += self.playback_rate;
         }
         let sample = self.filter.process(sample);
         let sample = self.eq.process(sample);
+        let sample = self.fx.process(sample);
         Some([sample[0] * self.volume, sample[1] * self.volume])
     }
 
@@ -420,14 +436,476 @@ impl Deck {
     fn seekable_frames(&self) -> u64 {
         self.total_frames.unwrap_or(self.decoded_frames)
     }
+
+    fn scrub_velocity_for_delta(&self, delta_frames: f64) -> f64 {
+        let control_interval_frames = self.sample_rate / 60.0;
+        (delta_frames / control_interval_frames).clamp(-12.0, 12.0)
+    }
 }
 use std::sync::mpsc::Receiver;
 
 use crate::decoder::DecodeMessage;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeckFxKind {
+    Echo,
+    Reverb,
+    Crush,
+    Flanger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeckFxConfig {
+    pub kind: DeckFxKind,
+    pub enabled: bool,
+    pub mix: f32,
+    pub amount: f32,
+    pub rate_hz: f32,
+    pub feedback: f32,
+}
+
+impl DeckFxConfig {
+    pub fn echo(mix: f32, delay_ms: f32, feedback: f32) -> Self {
+        Self {
+            kind: DeckFxKind::Echo,
+            enabled: true,
+            mix,
+            amount: delay_ms,
+            rate_hz: 0.0,
+            feedback,
+        }
+    }
+
+    pub fn reverb(mix: f32, size: f32, damping: f32) -> Self {
+        Self {
+            kind: DeckFxKind::Reverb,
+            enabled: true,
+            mix,
+            amount: size,
+            rate_hz: 0.0,
+            feedback: damping,
+        }
+    }
+
+    pub fn crush(mix: f32, depth: f32, downsample: f32) -> Self {
+        Self {
+            kind: DeckFxKind::Crush,
+            enabled: true,
+            mix,
+            amount: depth,
+            rate_hz: downsample,
+            feedback: 0.0,
+        }
+    }
+
+    pub fn flanger(mix: f32, depth: f32, rate_hz: f32, feedback: f32) -> Self {
+        Self {
+            kind: DeckFxKind::Flanger,
+            enabled: true,
+            mix,
+            amount: depth,
+            rate_hz,
+            feedback,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FxChain {
+    sample_rate: f32,
+    effects: Vec<DeckEffect>,
+}
+
+impl FxChain {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            sample_rate: sample_rate.max(1.0),
+            effects: Vec::new(),
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+        for effect in &mut self.effects {
+            effect.set_sample_rate(self.sample_rate);
+        }
+    }
+
+    fn set_effects(&mut self, effects: Vec<DeckFxConfig>) {
+        self.effects = effects
+            .into_iter()
+            .map(|config| DeckEffect::new(self.sample_rate, config))
+            .collect();
+    }
+
+    fn add_effect(&mut self, effect: DeckFxConfig) {
+        self.effects.push(DeckEffect::new(self.sample_rate, effect));
+    }
+
+    fn clear_effects(&mut self) {
+        self.effects.clear();
+    }
+
+    fn clear(&mut self) {
+        for effect in &mut self.effects {
+            effect.clear();
+        }
+    }
+
+    fn process(&mut self, mut sample: [f32; 2]) -> [f32; 2] {
+        for effect in &mut self.effects {
+            sample = effect.process(sample);
+        }
+        sample
+    }
+}
+
+#[derive(Debug)]
+enum DeckEffect {
+    Echo(EchoEffect),
+    Reverb(ReverbEffect),
+    Crush(CrushEffect),
+    Flanger(FlangerEffect),
+}
+
+impl DeckEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        match config.kind {
+            DeckFxKind::Echo => Self::Echo(EchoEffect::new(sample_rate, config)),
+            DeckFxKind::Reverb => Self::Reverb(ReverbEffect::new(sample_rate, config)),
+            DeckFxKind::Crush => Self::Crush(CrushEffect::new(config)),
+            DeckFxKind::Flanger => Self::Flanger(FlangerEffect::new(sample_rate, config)),
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        match self {
+            Self::Echo(effect) => effect.set_sample_rate(sample_rate),
+            Self::Reverb(effect) => effect.set_sample_rate(sample_rate),
+            Self::Crush(_) => {}
+            Self::Flanger(effect) => effect.set_sample_rate(sample_rate),
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Echo(effect) => effect.clear(),
+            Self::Reverb(effect) => effect.clear(),
+            Self::Crush(effect) => effect.clear(),
+            Self::Flanger(effect) => effect.clear(),
+        }
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        match self {
+            Self::Echo(effect) => effect.process(sample),
+            Self::Reverb(effect) => effect.process(sample),
+            Self::Crush(effect) => effect.process(sample),
+            Self::Flanger(effect) => effect.process(sample),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct EchoEffect {
+    config: DeckFxConfig,
+    sample_rate: f32,
+    buffer: Vec<[f32; 2]>,
+    index: usize,
+}
+
+impl EchoEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        let mut effect = Self {
+            config,
+            sample_rate: sample_rate.max(1.0),
+            buffer: Vec::new(),
+            index: 0,
+        };
+        effect.resize_buffer();
+        effect
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+        self.resize_buffer();
+    }
+
+    fn resize_buffer(&mut self) {
+        let delay_ms = self.config.amount.clamp(15.0, 2_000.0);
+        let len = ((self.sample_rate * delay_ms) / 1_000.0).round().max(1.0) as usize;
+        self.buffer = vec![[0.0, 0.0]; len];
+        self.index = 0;
+    }
+
+    fn clear(&mut self) {
+        self.buffer.fill([0.0, 0.0]);
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled || self.buffer.is_empty() {
+            return sample;
+        }
+        let delayed = self.buffer[self.index];
+        let feedback = self.config.feedback.clamp(0.0, 0.95);
+        self.buffer[self.index] = [
+            sample[0] + delayed[0] * feedback,
+            sample[1] + delayed[1] * feedback,
+        ];
+        self.index = (self.index + 1) % self.buffer.len();
+        wet_mix(sample, delayed, self.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct ReverbEffect {
+    config: DeckFxConfig,
+    sample_rate: f32,
+    combs: Vec<CombFilter>,
+    allpass_l: DelayLine,
+    allpass_r: DelayLine,
+}
+
+impl ReverbEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        let mut effect = Self {
+            config,
+            sample_rate: sample_rate.max(1.0),
+            combs: Vec::new(),
+            allpass_l: DelayLine::new(1),
+            allpass_r: DelayLine::new(1),
+        };
+        effect.rebuild();
+        effect
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+        self.rebuild();
+    }
+
+    fn rebuild(&mut self) {
+        let size = self.config.amount.clamp(0.0, 1.0);
+        let scale = 0.55 + size * 1.35;
+        let delays_ms = [29.7, 37.1, 41.1, 43.7];
+        self.combs = delays_ms
+            .iter()
+            .map(|delay| CombFilter::new(((self.sample_rate * delay * scale) / 1_000.0) as usize))
+            .collect();
+        self.allpass_l = DelayLine::new(((self.sample_rate * 5.0) / 1_000.0) as usize);
+        self.allpass_r = DelayLine::new(((self.sample_rate * 6.1) / 1_000.0) as usize);
+    }
+
+    fn clear(&mut self) {
+        for comb in &mut self.combs {
+            comb.clear();
+        }
+        self.allpass_l.clear();
+        self.allpass_r.clear();
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled {
+            return sample;
+        }
+        let feedback = 0.55 + self.config.amount.clamp(0.0, 1.0) * 0.35;
+        let damping = self.config.feedback.clamp(0.0, 0.9);
+        let mut wet = [0.0, 0.0];
+        for comb in &mut self.combs {
+            let output = comb.process(sample, feedback, damping);
+            wet[0] += output[0];
+            wet[1] += output[1];
+        }
+        let gain = 1.0 / self.combs.len().max(1) as f32;
+        wet = [wet[0] * gain, wet[1] * gain];
+        wet[0] = allpass_process(&mut self.allpass_l, wet[0], 0.5);
+        wet[1] = allpass_process(&mut self.allpass_r, wet[1], 0.5);
+        wet_mix(sample, wet, self.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct CrushEffect {
+    config: DeckFxConfig,
+    held: [f32; 2],
+    hold_counter: usize,
+}
+
+impl CrushEffect {
+    fn new(config: DeckFxConfig) -> Self {
+        Self {
+            config,
+            held: [0.0, 0.0],
+            hold_counter: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.held = [0.0, 0.0];
+        self.hold_counter = 0;
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled {
+            return sample;
+        }
+        let hold = (1.0 + self.config.rate_hz.clamp(0.0, 1.0) * 31.0).round() as usize;
+        if self.hold_counter == 0 {
+            let bits = (16.0 - self.config.amount.clamp(0.0, 1.0) * 12.0)
+                .round()
+                .max(2.0);
+            let steps = (2.0_f32).powf(bits - 1.0);
+            self.held = [
+                (sample[0] * steps).round() / steps,
+                (sample[1] * steps).round() / steps,
+            ];
+        }
+        self.hold_counter = (self.hold_counter + 1) % hold;
+        wet_mix(sample, self.held, self.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct FlangerEffect {
+    config: DeckFxConfig,
+    sample_rate: f32,
+    buffer: Vec<[f32; 2]>,
+    index: usize,
+    phase: f32,
+}
+
+impl FlangerEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        let mut effect = Self {
+            config,
+            sample_rate: sample_rate.max(1.0),
+            buffer: Vec::new(),
+            index: 0,
+            phase: 0.0,
+        };
+        effect.resize_buffer();
+        effect
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+        self.resize_buffer();
+    }
+
+    fn resize_buffer(&mut self) {
+        self.buffer = vec![[0.0, 0.0]; ((self.sample_rate * 0.025) as usize).max(2)];
+        self.index = 0;
+    }
+
+    fn clear(&mut self) {
+        self.buffer.fill([0.0, 0.0]);
+        self.phase = 0.0;
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled || self.buffer.is_empty() {
+            return sample;
+        }
+        let rate = self.config.rate_hz.clamp(0.01, 8.0);
+        let depth_ms = 0.5 + self.config.amount.clamp(0.0, 1.0) * 8.5;
+        let base_ms = 1.0;
+        let lfo = (self.phase * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+        let delay_frames = ((base_ms + depth_ms * lfo) * self.sample_rate / 1_000.0)
+            .round()
+            .clamp(1.0, (self.buffer.len() - 1) as f32) as usize;
+        let read = (self.index + self.buffer.len() - delay_frames) % self.buffer.len();
+        let delayed = self.buffer[read];
+        let feedback = self.config.feedback.clamp(-0.95, 0.95);
+        self.buffer[self.index] = [
+            sample[0] + delayed[0] * feedback,
+            sample[1] + delayed[1] * feedback,
+        ];
+        self.index = (self.index + 1) % self.buffer.len();
+        self.phase = (self.phase + rate / self.sample_rate) % 1.0;
+        wet_mix(sample, delayed, self.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct CombFilter {
+    delay: DelayLine,
+    last: [f32; 2],
+}
+
+impl CombFilter {
+    fn new(len: usize) -> Self {
+        Self {
+            delay: DelayLine::new(len),
+            last: [0.0, 0.0],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.delay.clear();
+        self.last = [0.0, 0.0];
+    }
+
+    fn process(&mut self, input: [f32; 2], feedback: f32, damping: f32) -> [f32; 2] {
+        let delayed = self.delay.read();
+        self.last = [
+            delayed[0] * (1.0 - damping) + self.last[0] * damping,
+            delayed[1] * (1.0 - damping) + self.last[1] * damping,
+        ];
+        self.delay.write([
+            input[0] + self.last[0] * feedback,
+            input[1] + self.last[1] * feedback,
+        ]);
+        delayed
+    }
+}
+
+#[derive(Debug)]
+struct DelayLine {
+    buffer: Vec<[f32; 2]>,
+    index: usize,
+}
+
+impl DelayLine {
+    fn new(len: usize) -> Self {
+        Self {
+            buffer: vec![[0.0, 0.0]; len.max(1)],
+            index: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buffer.fill([0.0, 0.0]);
+        self.index = 0;
+    }
+
+    fn read(&self) -> [f32; 2] {
+        self.buffer[self.index]
+    }
+
+    fn write(&mut self, sample: [f32; 2]) {
+        self.buffer[self.index] = sample;
+        self.index = (self.index + 1) % self.buffer.len();
+    }
+}
+
+fn allpass_process(delay: &mut DelayLine, input: f32, feedback: f32) -> f32 {
+    let delayed = delay.read()[0];
+    let output = -input + delayed;
+    delay.write([input + delayed * feedback, input + delayed * feedback]);
+    output
+}
+
+fn wet_mix(dry: [f32; 2], wet: [f32; 2], mix: f32) -> [f32; 2] {
+    let mix = mix.clamp(0.0, 1.0);
+    [
+        dry[0] * (1.0 - mix) + wet[0] * mix,
+        dry[1] * (1.0 - mix) + wet[1] * mix,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Deck, DeckFilter};
+    use super::{Deck, DeckFilter, DeckFxConfig};
 
     #[test]
     fn seek_updates_loaded_deck_position() {
@@ -486,6 +964,42 @@ mod tests {
     }
 
     #[test]
+    fn scrub_moves_with_continuous_velocity() {
+        let mut deck = Deck::new(600.0);
+        deck.load(vec![[0.25, 0.25]; 1_000]);
+        deck.set_position_ratio(0.10);
+        deck.start_scrub();
+        deck.scrub_to_position_ratio(0.11);
+
+        let before = deck.position_ratio();
+        let _ = deck.next_frame();
+        let after_one_frame = deck.position_ratio();
+        let _ = deck.next_frame();
+        let after_two_frames = deck.position_ratio();
+
+        assert!(after_one_frame > before);
+        assert!(after_two_frames > after_one_frame);
+        assert!(after_one_frame < 0.11);
+    }
+
+    #[test]
+    fn scrub_keeps_moving_between_control_updates() {
+        let mut deck = Deck::new(44_100.0);
+        deck.load(vec![[0.25, 0.25]; 100_000]);
+        deck.set_position_ratio(0.10);
+        deck.start_scrub();
+        deck.scrub_to_position_ratio(0.105);
+
+        let mut previous = deck.position_ratio();
+        for _ in 0..1_000 {
+            let _ = deck.next_frame();
+            let next = deck.position_ratio();
+            assert!(next > previous);
+            previous = next;
+        }
+    }
+
+    #[test]
     fn legacy_cutoff_filter_processes_low_pass() {
         let mut filter = DeckFilter::new(44_100.0);
         let sample = [1.0, 1.0];
@@ -493,5 +1007,55 @@ mod tests {
         filter.set_low_pass_cutoff(60.0);
 
         assert_ne!(filter.process(sample), sample);
+    }
+
+    #[test]
+    fn deck_fx_chain_applies_multiple_effects() {
+        let mut deck = Deck::new(44_100.0);
+        deck.load(vec![[0.5, -0.5]; 4_000]);
+        deck.set_fx_chain(vec![
+            DeckFxConfig::crush(1.0, 1.0, 0.0),
+            DeckFxConfig::flanger(0.6, 0.8, 0.5, 0.2),
+        ]);
+        deck.play();
+
+        let first = deck.next_frame().expect("frame");
+        let later = (0..2_000).filter_map(|_| deck.next_frame()).last().unwrap();
+
+        assert_ne!(first, [0.5, -0.5]);
+        assert_ne!(later, first);
+    }
+
+    #[test]
+    fn echo_repeats_delayed_signal() {
+        let mut deck = Deck::new(1_000.0);
+        let mut samples = vec![[0.0, 0.0]; 80];
+        samples[0] = [1.0, 1.0];
+        deck.load(samples);
+        deck.set_fx_chain(vec![DeckFxConfig::echo(1.0, 20.0, 0.5)]);
+        deck.play();
+
+        let frames = (0..24)
+            .filter_map(|_| deck.next_frame())
+            .collect::<Vec<_>>();
+
+        assert!(frames[0][0].abs() < 0.0001);
+        assert!(frames.iter().skip(19).any(|frame| frame[0] > 0.9));
+    }
+
+    #[test]
+    fn reverb_generates_wet_signal() {
+        let mut deck = Deck::new(1_000.0);
+        let mut samples = vec![[0.0, 0.0]; 120];
+        samples[0] = [1.0, 1.0];
+        deck.load(samples);
+        deck.set_fx_chain(vec![DeckFxConfig::reverb(1.0, 0.8, 0.2)]);
+        deck.play();
+
+        let frames = (0..80)
+            .filter_map(|_| deck.next_frame())
+            .collect::<Vec<_>>();
+
+        assert!(frames.iter().skip(20).any(|frame| frame[0].abs() > 0.01));
     }
 }

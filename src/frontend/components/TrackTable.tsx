@@ -5,6 +5,7 @@ import { classNames, EnergyBars, formatPlays, StarRating, ui } from "./common";
 
 type TrackTableProps = {
   tracks: Track[];
+  controllerFocused: boolean;
   sort: SortState;
   setSort: (sort: SortState) => void;
   selected: string;
@@ -37,7 +38,7 @@ const cols: Array<{ id: SortableTrackKey | "idx" | "compat"; label: string; w: s
 const rowHeight = 26;
 const overscan = 5;
 
-export function TrackTable({ tracks, sort, setSort, selected, setSelected, multiSelected, setMultiSelected, hoveredId, setHoveredId, onPreview, baseTrack }: TrackTableProps) {
+export function TrackTable({ tracks, controllerFocused, sort, setSort, selected, setSelected, multiSelected, setMultiSelected, hoveredId, setHoveredId, onPreview, baseTrack }: TrackTableProps) {
   const data = window.PC_DATA;
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -62,6 +63,22 @@ export function TrackTable({ tracks, sort, setSort, selected, setSelected, multi
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+
+    const index = tracks.findIndex((track) => track.id === selected);
+    if (index === -1) return;
+
+    const rowTop = index * rowHeight;
+    const rowBottom = rowTop + rowHeight;
+    if (rowTop < element.scrollTop) {
+      element.scrollTop = rowTop;
+    } else if (rowBottom > element.scrollTop + element.clientHeight) {
+      element.scrollTop = rowBottom - element.clientHeight;
+    }
+  }, [selected, tracks]);
 
   return (
     <div className="grid h-full min-h-0 grid-rows-[24px_minmax(0,1fr)] overflow-hidden bg-bg">
@@ -95,6 +112,7 @@ export function TrackTable({ tracks, sort, setSort, selected, setSelected, multi
             <TrackRow
               key={track.id}
               baseTrack={baseTrack}
+              controllerFocused={controllerFocused}
               gridTemplateColumns={gridTemplateColumns}
               hovered={hoveredId === track.id}
               index={index}
@@ -118,6 +136,7 @@ export function TrackTable({ tracks, sort, setSort, selected, setSelected, multi
 
 const TrackRow = memo(function TrackRow({
   baseTrack,
+  controllerFocused,
   gridTemplateColumns,
   hovered,
   index,
@@ -131,6 +150,7 @@ const TrackRow = memo(function TrackRow({
   track
 }: {
   baseTrack: Track | null;
+  controllerFocused: boolean;
   gridTemplateColumns: string;
   hovered: boolean;
   index: number;
@@ -159,6 +179,7 @@ const TrackRow = memo(function TrackRow({
       className={classNames(
         "grid h-[26px] cursor-grab select-none items-center border-b border-[#131418] text-[12px] text-text-1 hover:bg-surface-2 active:cursor-grabbing",
         selected && "bg-accent/10 shadow-[inset_2px_0_0_var(--color-accent)] hover:bg-accent/15",
+        selected && controllerFocused && "outline outline-1 -outline-offset-1 outline-accent",
         multiSelected && "bg-accent/5",
         hovered && "bg-surface-2",
         !track.analyzed && "text-text-2"

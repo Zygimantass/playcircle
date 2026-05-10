@@ -412,7 +412,7 @@ function TempoControl({
     const bounds = event.currentTarget.getBoundingClientRect();
     const trackTop = bounds.top + 8;
     const trackHeight = Math.max(1, bounds.height - 16);
-    const pointerRatio = 1 - (event.clientY - trackTop) / trackHeight;
+    const pointerRatio = (event.clientY - trackTop) / trackHeight;
     const nextTempo = -tempoRange + clamp(pointerRatio, 0, 1) * tempoRange * 2;
     onSetTempo(deck, Number(nextTempo.toFixed(1)));
   };
@@ -421,6 +421,7 @@ function TempoControl({
     <div className={classNames("grid h-full min-h-0 min-w-0 grid-cols-[32px_28px_44px] items-stretch justify-center gap-2 font-mono text-[9px] text-text-2", trackDragActive && "pointer-events-none")}>
       <span
         aria-label={`Deck ${deck} tempo`}
+        aria-orientation="vertical"
         aria-valuemax={tempoRange}
         aria-valuemin={-tempoRange}
         aria-valuenow={Number(clampedTempo.toFixed(1))}
@@ -448,13 +449,13 @@ function TempoControl({
         <span className="absolute left-1/2 top-1/2 h-1 w-4 -translate-x-1/2 -translate-y-1/2 rounded-sm bg-line-2" />
         <span
           className="absolute left-1/2 h-3 w-6 -translate-x-1/2 rounded-[2px] border border-line-2 bg-accent shadow-[0_1px_4px_rgba(0,0,0,0.45)]"
-          style={{ top: `calc(2px + ${(1 - ratio) * 100}% - ${(1 - ratio) * 16}px)` }}
+          style={{ top: `calc(2px + ${ratio * 100}% - ${ratio * 16}px)` }}
         />
       </span>
       <span className="grid content-between text-left text-[8px] text-text-3">
-        <span>+{tempoRange}</span>
-        <span>0</span>
         <span>-{tempoRange}</span>
+        <span>0</span>
+        <span>+{tempoRange}</span>
       </span>
       <span className="grid min-h-0 content-start gap-1">
         <span className="text-[8px] font-semibold tracking-[0.08em] text-text-3">TEMPO</span>
@@ -504,10 +505,10 @@ function handleTempoKeyDown(
   const step = event.shiftKey ? 0.1 : 0.5;
   if (event.key === "ArrowUp" || event.key === "ArrowRight") {
     event.preventDefault();
-    onSetTempo(deck, Number(clamp(value + step, -range, range).toFixed(1)));
+    onSetTempo(deck, Number(clamp(value - step, -range, range).toFixed(1)));
   } else if (event.key === "ArrowDown" || event.key === "ArrowLeft") {
     event.preventDefault();
-    onSetTempo(deck, Number(clamp(value - step, -range, range).toFixed(1)));
+    onSetTempo(deck, Number(clamp(value + step, -range, range).toFixed(1)));
   } else if (event.key === "Home") {
     event.preventDefault();
     onSetTempo(deck, -range);

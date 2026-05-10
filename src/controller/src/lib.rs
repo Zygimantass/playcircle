@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 
-use midir::{Ignore, MidiInput, MidiInputConnection};
+use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -54,6 +54,14 @@ pub enum ControllerAction {
     LoadSelected {
         deck: ControllerDeck,
     },
+    Browse {
+        ticks: i8,
+        shifted: bool,
+    },
+    BrowsePress {
+        shifted: bool,
+        pressed: bool,
+    },
     Tempo {
         deck: ControllerDeck,
         value: f32,
@@ -79,6 +87,30 @@ pub enum ControllerAction {
         index: u8,
         pressed: bool,
     },
+    FxSelect {
+        direction: i8,
+        pressed: bool,
+    },
+    FxFocus {
+        direction: i8,
+        pressed: bool,
+    },
+    FxTarget {
+        target: FxTarget,
+    },
+    FxDepth {
+        value: f32,
+    },
+    FxToggle {
+        pressed: bool,
+    },
+    FxClear {
+        pressed: bool,
+    },
+    JogTouch {
+        deck: ControllerDeck,
+        pressed: bool,
+    },
     Jog {
         deck: ControllerDeck,
         ticks: i8,
@@ -100,12 +132,21 @@ pub enum EqBand {
     Low,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FxTarget {
+    DeckA,
+    DeckB,
+    Both,
+}
+
 pub trait ControllerMapper: Send {
     fn map(&mut self, message: &MidiMessage) -> ControllerAction;
 }
 
 pub struct ControllerManager {
-    connection: Option<MidiInputConnection<()>>,
+    input_connection: Option<MidiInputConnection<()>>,
+    output_connection: Option<MidiOutputConnection>,
     receiver: Option<Receiver<ControllerEvent>>,
     connected_device: Option<ControllerDevice>,
 }
@@ -113,7 +154,8 @@ pub struct ControllerManager {
 impl ControllerManager {
     pub fn new() -> Self {
         Self {
-            connection: None,
+            input_connection: None,
+            output_connection: None,
             receiver: None,
             connected_device: None,
         }
@@ -170,7 +212,7 @@ impl ControllerManager {
         let mut mapper = mapper_for_kind(device.kind);
         let (sender, receiver) = mpsc::channel();
 
-        let connection = midi_in
+        let input_connection = midi_in
             .connect(
                 port,
                 "playcircle-controller-input",
@@ -188,15 +230,18 @@ impl ControllerManager {
                 (),
             )
             .map_err(|error| format!("failed to connect to MIDI input {id}: {error}"))?;
+        let output_connection = connect_output_for_device(&device.name).ok();
 
-        self.connection = Some(connection);
+        self.input_connection = Some(input_connection);
+        self.output_connection = output_connection;
         self.receiver = Some(receiver);
         self.connected_device = Some(device.clone());
         Ok(device)
     }
 
     pub fn disconnect(&mut self) {
-        self.connection = None;
+        self.input_connection = None;
+        self.output_connection = None;
         self.receiver = None;
         self.connected_device = None;
     }
@@ -206,6 +251,16 @@ impl ControllerManager {
             .as_ref()
             .map(|receiver| receiver.try_iter().collect())
             .unwrap_or_default()
+    }
+
+    pub fn send_midi(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let connection = self
+            .output_connection
+            .as_mut()
+            .ok_or_else(|| "controller MIDI output is not connected".to_string())?;
+        connection
+            .send(bytes)
+            .map_err(|error| format!("failed to send MIDI output: {error}"))
     }
 }
 
@@ -244,6 +299,47 @@ fn midi_input() -> Result<MidiInput, String> {
         .map_err(|error| format!("failed to initialize MIDI input: {error}"))
 }
 
+fn midi_output() -> Result<MidiOutput, String> {
+    MidiOutput::new("playcircle-controller-output")
+        .map_err(|error| format!("failed to initialize MIDI output: {error}"))
+}
+
+fn connect_output_for_device(input_name: &str) -> Result<MidiOutputConnection, String> {
+    let midi_out = midi_output()?;
+    let ports = midi_out.ports();
+    let input_name_lower = input_name.to_ascii_lowercase();
+    let requested_kind = device_kind_from_name(input_name);
+    let fallback_index = ports.iter().position(|port| {
+        midi_out
+            .port_name(port)
+            .ok()
+            .map(|name| device_kind_from_name(&name) == requested_kind)
+            .unwrap_or(false)
+    });
+    let matching_index = ports.iter().position(|port| {
+        midi_out
+            .port_name(port)
+            .ok()
+            .map(|name| {
+                let name = name.to_ascii_lowercase();
+                name == input_name_lower
+                    || name.contains(&input_name_lower)
+                    || input_name_lower.contains(&name)
+            })
+            .unwrap_or(false)
+    });
+    let index = matching_index
+        .or(fallback_index)
+        .ok_or_else(|| format!("no MIDI output found for {input_name}"))?;
+    let port = &ports[index];
+    let name = midi_out
+        .port_name(port)
+        .unwrap_or_else(|_| format!("MIDI output {index}"));
+    midi_out
+        .connect(port, "playcircle-controller-output")
+        .map_err(|error| format!("failed to connect to MIDI output {name}: {error}"))
+}
+
 fn device_id(index: usize) -> String {
     format!("midi-in:{index}")
 }
@@ -272,21 +368,47 @@ impl ControllerMapper for RawMapper {
 
 pub struct Flx4Mapper {
     lsb_by_channel_and_cc: HashMap<(u8, u8), u8>,
+    beat_fx_deck_a: bool,
+    beat_fx_deck_b: bool,
 }
 
 impl Flx4Mapper {
     pub fn new() -> Self {
         Self {
             lsb_by_channel_and_cc: HashMap::new(),
+            beat_fx_deck_a: false,
+            beat_fx_deck_b: false,
         }
     }
 
-    fn map_note(&self, channel: u8, note: u8, velocity: u8) -> ControllerAction {
+    fn map_note(&mut self, channel: u8, note: u8, velocity: u8) -> ControllerAction {
+        if let Some(action) = self.map_beat_fx_note(channel, note, velocity) {
+            return action;
+        }
+
         if channel == 6 {
             if velocity == 0 {
-                return ControllerAction::Raw;
+                return match note {
+                    0x41 => ControllerAction::BrowsePress {
+                        shifted: false,
+                        pressed: false,
+                    },
+                    0x42 => ControllerAction::BrowsePress {
+                        shifted: true,
+                        pressed: false,
+                    },
+                    _ => ControllerAction::Raw,
+                };
             }
             return match note {
+                0x41 => ControllerAction::BrowsePress {
+                    shifted: false,
+                    pressed: true,
+                },
+                0x42 => ControllerAction::BrowsePress {
+                    shifted: true,
+                    pressed: true,
+                },
                 0x46 => ControllerAction::LoadSelected {
                     deck: ControllerDeck::A,
                 },
@@ -313,6 +435,10 @@ impl Flx4Mapper {
         };
 
         match note {
+            0x36 => ControllerAction::JogTouch {
+                deck,
+                pressed: velocity > 0,
+            },
             0x0b => ControllerAction::PlayPause {
                 deck,
                 pressed: velocity > 0,
@@ -325,7 +451,65 @@ impl Flx4Mapper {
         }
     }
 
+    fn map_beat_fx_note(
+        &mut self,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+    ) -> Option<ControllerAction> {
+        let pressed = velocity > 0;
+        match (channel, note) {
+            (4, 0x63) => Some(ControllerAction::FxSelect {
+                direction: 1,
+                pressed,
+            }),
+            (4, 0x64) => Some(ControllerAction::FxSelect {
+                direction: -1,
+                pressed,
+            }),
+            (4, 0x4a) => Some(ControllerAction::FxFocus {
+                direction: -1,
+                pressed,
+            }),
+            (4, 0x4b) => Some(ControllerAction::FxFocus {
+                direction: 1,
+                pressed,
+            }),
+            (4, 0x10) => {
+                self.beat_fx_deck_a = pressed;
+                self.beat_fx_target_action()
+            }
+            (5, 0x11) => {
+                self.beat_fx_deck_b = pressed;
+                self.beat_fx_target_action()
+            }
+            (4 | 5, 0x47) => Some(ControllerAction::FxToggle { pressed }),
+            (4 | 5, 0x43) => Some(ControllerAction::FxClear { pressed }),
+            _ => None,
+        }
+    }
+
+    fn beat_fx_target_action(&self) -> Option<ControllerAction> {
+        let target = match (self.beat_fx_deck_a, self.beat_fx_deck_b) {
+            (true, true) => FxTarget::Both,
+            (true, false) => FxTarget::DeckA,
+            (false, true) => FxTarget::DeckB,
+            (false, false) => return None,
+        };
+        Some(ControllerAction::FxTarget { target })
+    }
+
     fn map_control_change(&mut self, channel: u8, control: u8, value: u8) -> ControllerAction {
+        if matches!(control, 0x21 | 0x22 | 0x23 | 0x29) {
+            let Some(deck) = deck_from_channel(channel) else {
+                return ControllerAction::Raw;
+            };
+            return ControllerAction::Jog {
+                deck,
+                ticks: relative_jog_ticks(value),
+            };
+        }
+
         if (0x20..=0x3f).contains(&control) {
             self.lsb_by_channel_and_cc
                 .insert((channel, control - 0x20), value);
@@ -340,8 +524,20 @@ impl Flx4Mapper {
         let normalized = normalize_14_bit(value, fine);
         let centered = centered_14_bit(value, fine);
 
+        if channel == 4 && control == 0x02 {
+            return ControllerAction::FxDepth { value: normalized };
+        }
+
         if channel == 6 {
             return match control {
+                0x40 => ControllerAction::Browse {
+                    ticks: relative_browse_ticks(value),
+                    shifted: false,
+                },
+                0x64 => ControllerAction::Browse {
+                    ticks: relative_browse_ticks(value),
+                    shifted: true,
+                },
                 0x17 => ControllerAction::Filter {
                     deck: ControllerDeck::A,
                     value: centered,
@@ -433,6 +629,18 @@ fn centered_14_bit(msb: u8, lsb: u8) -> f32 {
     (normalize_14_bit(msb, lsb) * 2.0 - 1.0).clamp(-1.0, 1.0)
 }
 
+fn relative_jog_ticks(value: u8) -> i8 {
+    value.wrapping_sub(64) as i8
+}
+
+fn relative_browse_ticks(value: u8) -> i8 {
+    if value <= 0x3f {
+        value as i8
+    } else {
+        (value as i16 - 0x80) as i8
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +726,72 @@ mod tests {
     }
 
     #[test]
+    fn flx4_maps_browse_encoder_and_press() {
+        let mut mapper = Flx4Mapper::new();
+        assert_eq!(
+            mapper.map(&midi(0xb6, 0x40, 0x01)),
+            ControllerAction::Browse {
+                ticks: 1,
+                shifted: false
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0xb6, 0x64, 0x7f)),
+            ControllerAction::Browse {
+                ticks: -1,
+                shifted: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x96, 0x41, 0x7f)),
+            ControllerAction::BrowsePress {
+                shifted: false,
+                pressed: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x96, 0x42, 0x00)),
+            ControllerAction::BrowsePress {
+                shifted: true,
+                pressed: false
+            }
+        );
+    }
+
+    #[test]
+    fn flx4_maps_jog_touch_and_rotation() {
+        let mut mapper = Flx4Mapper::new();
+        assert_eq!(
+            mapper.map(&midi(0x90, 0x36, 0x7f)),
+            ControllerAction::JogTouch {
+                deck: ControllerDeck::A,
+                pressed: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x91, 0x36, 0x00)),
+            ControllerAction::JogTouch {
+                deck: ControllerDeck::B,
+                pressed: false
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0xb0, 0x22, 0x41)),
+            ControllerAction::Jog {
+                deck: ControllerDeck::A,
+                ticks: 1
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0xb1, 0x22, 0x3f)),
+            ControllerAction::Jog {
+                deck: ControllerDeck::B,
+                ticks: -1
+            }
+        );
+    }
+
+    #[test]
     fn flx4_maps_eq_and_volume_controls() {
         let mut mapper = Flx4Mapper::new();
         assert_eq!(
@@ -574,6 +848,76 @@ mod tests {
             mapper.map(&midi(0xb6, 0x1f, 0x7f)),
             ControllerAction::Crossfader {
                 value: normalize_14_bit(0x7f, 0)
+            }
+        );
+    }
+
+    #[test]
+    fn flx4_maps_beat_fx_controls() {
+        let mut mapper = Flx4Mapper::new();
+        assert_eq!(
+            mapper.map(&midi(0x94, 0x63, 0x7f)),
+            ControllerAction::FxSelect {
+                direction: 1,
+                pressed: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x94, 0x64, 0x7f)),
+            ControllerAction::FxSelect {
+                direction: -1,
+                pressed: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x94, 0x4a, 0x7f)),
+            ControllerAction::FxFocus {
+                direction: -1,
+                pressed: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x94, 0x4b, 0x7f)),
+            ControllerAction::FxFocus {
+                direction: 1,
+                pressed: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0xb4, 0x02, 0x40)),
+            ControllerAction::FxDepth {
+                value: normalize_14_bit(0x40, 0)
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x94, 0x47, 0x7f)),
+            ControllerAction::FxToggle { pressed: true }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x95, 0x43, 0x7f)),
+            ControllerAction::FxClear { pressed: true }
+        );
+    }
+
+    #[test]
+    fn flx4_maps_beat_fx_channel_target() {
+        let mut mapper = Flx4Mapper::new();
+        assert_eq!(
+            mapper.map(&midi(0x94, 0x10, 0x7f)),
+            ControllerAction::FxTarget {
+                target: FxTarget::DeckA
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x95, 0x11, 0x7f)),
+            ControllerAction::FxTarget {
+                target: FxTarget::Both
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x94, 0x10, 0x00)),
+            ControllerAction::FxTarget {
+                target: FxTarget::DeckB
             }
         );
     }

@@ -1,14 +1,59 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use playcircle_audio::{decoder::decode_file, AudioEngine, DeckId};
+use playcircle_audio::{decoder::decode_file, AudioEngine, DeckFxConfig, DeckFxKind, DeckId};
 use playcircle_controller::{ControllerDevice, ControllerEvent, ControllerManager};
 use playcircle_rekordbox::{
     RekordboxBeat, RekordboxDatabase, RekordboxLibrary, RekordboxPlaylist, RekordboxTrack,
 };
+use serde::Deserialize;
 
 struct AudioEngineState(Mutex<Option<AudioEngine>>);
 struct ControllerState(Mutex<ControllerManager>);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioDeckFxConfigDto {
+    kind: AudioDeckFxKindDto,
+    enabled: bool,
+    mix: f32,
+    amount: f32,
+    rate_hz: f32,
+    feedback: f32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum AudioDeckFxKindDto {
+    Echo,
+    Reverb,
+    Crush,
+    Flanger,
+}
+
+impl From<AudioDeckFxKindDto> for DeckFxKind {
+    fn from(kind: AudioDeckFxKindDto) -> Self {
+        match kind {
+            AudioDeckFxKindDto::Echo => DeckFxKind::Echo,
+            AudioDeckFxKindDto::Reverb => DeckFxKind::Reverb,
+            AudioDeckFxKindDto::Crush => DeckFxKind::Crush,
+            AudioDeckFxKindDto::Flanger => DeckFxKind::Flanger,
+        }
+    }
+}
+
+impl From<AudioDeckFxConfigDto> for DeckFxConfig {
+    fn from(effect: AudioDeckFxConfigDto) -> Self {
+        Self {
+            kind: effect.kind.into(),
+            enabled: effect.enabled,
+            mix: effect.mix,
+            amount: effect.amount,
+            rate_hz: effect.rate_hz,
+            feedback: effect.feedback,
+        }
+    }
+}
 
 #[tauri::command]
 fn load_rekordbox_tracks(path: Option<String>) -> Result<Vec<RekordboxTrack>, String> {
@@ -286,6 +331,28 @@ fn set_audio_deck_cue(
 }
 
 #[tauri::command]
+fn set_audio_deck_fx_chain(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+    effects: Vec<AudioDeckFxConfigDto>,
+) -> Result<(), String> {
+    let effects = effects.into_iter().map(DeckFxConfig::from).collect();
+    with_audio_engine(&state, |engine| {
+        engine.set_deck_fx_chain(DeckId::from_label(&deck)?, effects)
+    })
+}
+
+#[tauri::command]
+fn clear_audio_deck_fx(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.clear_deck_fx(DeckId::from_label(&deck)?)
+    })
+}
+
+#[tauri::command]
 fn set_audio_master_volume(
     state: tauri::State<'_, AudioEngineState>,
     volume: f32,
@@ -367,6 +434,18 @@ fn poll_controller_events(
     Ok(manager.poll_events())
 }
 
+#[tauri::command]
+fn send_controller_midi(
+    state: tauri::State<'_, ControllerState>,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    let mut manager = state
+        .0
+        .lock()
+        .map_err(|_| "controller state lock poisoned".to_string())?;
+    manager.send_midi(&bytes)
+}
+
 fn with_audio_engine<T>(
     state: &tauri::State<'_, AudioEngineState>,
     action: impl FnOnce(&AudioEngine) -> Result<T, String>,
@@ -408,6 +487,8 @@ pub fn run() {
             set_audio_deck_filter_amount,
             set_audio_deck_eq,
             set_audio_deck_cue,
+            set_audio_deck_fx_chain,
+            clear_audio_deck_fx,
             set_audio_master_volume,
             audio_deck_position,
             audio_deck_error,
@@ -415,7 +496,8 @@ pub fn run() {
             list_controllers,
             connect_controller,
             disconnect_controller,
-            poll_controller_events
+            poll_controller_events,
+            send_controller_midi
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playcircle");

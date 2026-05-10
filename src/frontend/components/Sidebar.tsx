@@ -1,5 +1,5 @@
 import { useDraggable, useDroppable } from "@dnd-kit/core";
-import { memo, useMemo, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { isRecentlyAdded, recentAddedCutoff } from "../data/recentTracks";
 import type { CurrentNode, PcData, PlaylistEntry } from "../designTypes";
 import { classNames, ui } from "./common";
@@ -7,6 +7,7 @@ import { classNames, ui } from "./common";
 type SidebarProps = {
   data: PcData;
   currentNode: CurrentNode;
+  focused: boolean;
   setCurrentNode: (node: CurrentNode) => void;
   onDropToCrate: (crateId: string, trackId: string) => void;
   onCreatePlaylist: (name: string) => void;
@@ -38,6 +39,7 @@ function SidebarItem({
   label,
   count,
   active,
+  focused,
   color,
   onClick,
   onDrop,
@@ -47,6 +49,7 @@ function SidebarItem({
   label: string;
   count?: number;
   active?: boolean;
+  focused?: boolean;
   color?: string;
   onClick: () => void;
   onDrop?: (event: React.DragEvent<HTMLButtonElement>) => void;
@@ -54,7 +57,14 @@ function SidebarItem({
 }) {
   return (
     <button
-      className={classNames(ui.sideItem, "w-full", active && ui.activeSideItem, dragOver && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim")}
+      data-current-sidebar-node={active ? "true" : undefined}
+      className={classNames(
+        ui.sideItem,
+        "w-full",
+        active && ui.activeSideItem,
+        active && focused && "bg-accent/15 text-text-1 outline outline-1 -outline-offset-1 outline-accent",
+        dragOver && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim"
+      )}
       onClick={onClick}
       onDragOver={(event) => {
         if (onDrop) {
@@ -75,6 +85,7 @@ function SidebarItem({
 function PlaylistTreeItem({
   playlist,
   currentNode,
+  focused,
   setCurrentNode,
   onMovePlaylistToFolder,
   playlistDragActive,
@@ -82,6 +93,7 @@ function PlaylistTreeItem({
 }: {
   playlist: PlaylistEntry;
   currentNode: CurrentNode;
+  focused: boolean;
   setCurrentNode: (node: CurrentNode) => void;
   onMovePlaylistToFolder: (playlistId: string, folderId: string) => void;
   playlistDragActive: boolean;
@@ -114,9 +126,11 @@ function PlaylistTreeItem({
           ui.sideItem,
           "w-full",
           currentNode.type === "playlist" && currentNode.id === playlist.id && ui.activeSideItem,
+          currentNode.type === "playlist" && currentNode.id === playlist.id && focused && "bg-accent/15 text-text-1 outline outline-1 -outline-offset-1 outline-accent",
           isTrackOver && !playlist.isFolder && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim",
           isPlaylistOver && playlist.isFolder && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim"
         )}
+        data-current-sidebar-node={currentNode.type === "playlist" && currentNode.id === playlist.id ? "true" : undefined}
         data-playlist-id={playlist.id}
         data-playlist-folder={playlist.isFolder ? "true" : "false"}
         data-testid="playlist-row"
@@ -150,6 +164,7 @@ function PlaylistTreeItem({
               key={child.id}
               playlist={child}
               currentNode={currentNode}
+              focused={focused}
               setCurrentNode={setCurrentNode}
               onMovePlaylistToFolder={onMovePlaylistToFolder}
               playlistDragActive={playlistDragActive}
@@ -162,7 +177,8 @@ function PlaylistTreeItem({
   );
 }
 
-export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode, onDropToCrate, onCreatePlaylist, onMovePlaylistToFolder, playlistDragActive, dragHoverCrate, setDragHoverCrate }: SidebarProps) {
+export const Sidebar = memo(function Sidebar({ data, currentNode, focused, setCurrentNode, onDropToCrate, onCreatePlaylist, onMovePlaylistToFolder, playlistDragActive, dragHoverCrate, setDragHoverCrate }: SidebarProps) {
+  const scrollRef = useRef<HTMLElement>(null);
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [playlistName, setPlaylistName] = useState("");
   const { recentCount, fiveStarCount } = useMemo(() => {
@@ -176,13 +192,19 @@ export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode
     return { recentCount, fiveStarCount };
   }, [data.TRACKS]);
 
+  useLayoutEffect(() => {
+    if (!focused) return;
+    const element = scrollRef.current?.querySelector<HTMLElement>('[data-current-sidebar-node="true"]');
+    element?.scrollIntoView({ block: "nearest" });
+  }, [currentNode, focused]);
+
   return (
-    <aside className="overflow-y-auto bg-surface-1 py-1.5 pb-3 [scrollbar-color:var(--color-line-2)_transparent] [scrollbar-width:thin]">
+    <aside ref={scrollRef} className="overflow-y-auto bg-surface-1 py-1.5 pb-3 [scrollbar-color:var(--color-line-2)_transparent] [scrollbar-width:thin]">
       <SidebarSection title="LIBRARY">
-        <SidebarItem icon="◐" label="All Tracks" count={data.TRACKS.length} active={currentNode.type === "all"} onClick={() => setCurrentNode({ type: "all" })} />
-        <SidebarItem icon="✦" label="Recently Added" count={recentCount} active={currentNode.type === "recent"} onClick={() => setCurrentNode({ type: "recent" })} />
-        <SidebarItem icon="★" label="5-Star" count={fiveStarCount} active={currentNode.type === "fivestar"} onClick={() => setCurrentNode({ type: "fivestar" })} />
-        <SidebarItem icon="↻" label="History" count={142} active={currentNode.type === "history"} onClick={() => setCurrentNode({ type: "history" })} />
+        <SidebarItem icon="◐" label="All Tracks" count={data.TRACKS.length} active={currentNode.type === "all"} focused={focused} onClick={() => setCurrentNode({ type: "all" })} />
+        <SidebarItem icon="✦" label="Recently Added" count={recentCount} active={currentNode.type === "recent"} focused={focused} onClick={() => setCurrentNode({ type: "recent" })} />
+        <SidebarItem icon="★" label="5-Star" count={fiveStarCount} active={currentNode.type === "fivestar"} focused={focused} onClick={() => setCurrentNode({ type: "fivestar" })} />
+        <SidebarItem icon="↻" label="History" count={142} active={currentNode.type === "history"} focused={focused} onClick={() => setCurrentNode({ type: "history" })} />
       </SidebarSection>
 
       <SidebarSection title="CRATES" count={data.CRATES.length}>
@@ -193,6 +215,7 @@ export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode
             label={crate.name}
             count={crate.count}
             active={currentNode.type === "crate" && currentNode.id === crate.id}
+            focused={focused}
             dragOver={dragHoverCrate === crate.id}
             onClick={() => setCurrentNode({ type: "crate", id: crate.id })}
             onDrop={(event) => {
@@ -251,6 +274,7 @@ export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode
             key={playlist.id}
             playlist={playlist}
             currentNode={currentNode}
+            focused={focused}
             setCurrentNode={setCurrentNode}
             onMovePlaylistToFolder={onMovePlaylistToFolder}
             playlistDragActive={playlistDragActive}
@@ -260,13 +284,13 @@ export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode
 
       <SidebarSection title="SMART LISTS" count={data.SMART.length}>
         {data.SMART.map((smart) => (
-          <SidebarItem key={smart.id} icon="◇" label={smart.name} count={smart.count} active={currentNode.type === "smart" && currentNode.id === smart.id} onClick={() => setCurrentNode({ type: "smart", id: smart.id })} />
+          <SidebarItem key={smart.id} icon="◇" label={smart.name} count={smart.count} active={currentNode.type === "smart" && currentNode.id === smart.id} focused={focused} onClick={() => setCurrentNode({ type: "smart", id: smart.id })} />
         ))}
       </SidebarSection>
 
       <SidebarSection title="TAGS" count={data.TAGS.length} defaultOpen={false}>
         {data.TAGS.map((tag) => (
-          <SidebarItem key={tag.id} color={tag.color} label={tag.label} active={currentNode.type === "tag" && currentNode.id === tag.label} onClick={() => setCurrentNode({ type: "tag", id: tag.label })} />
+          <SidebarItem key={tag.id} color={tag.color} label={tag.label} active={currentNode.type === "tag" && currentNode.id === tag.label} focused={focused} onClick={() => setCurrentNode({ type: "tag", id: tag.label })} />
         ))}
       </SidebarSection>
     </aside>

@@ -1,6 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type DeckId = "A" | "B";
+export type DeckFxKind = "echo" | "reverb" | "crush" | "flanger";
+export type DeckFxConfig = {
+  kind: DeckFxKind;
+  enabled: boolean;
+  mix: number;
+  amount: number;
+  rateHz: number;
+  feedback: number;
+};
 
 const fixtureState: Record<DeckId, { position: number; tempoPercent: number }> = {
   A: { position: 0, tempoPercent: 0 },
@@ -119,6 +128,18 @@ export function setAudioDeckCue(deck: DeckId, enabled: boolean) {
   if (usesBrowserAudioFixture()) return Promise.resolve();
 
   return invoke<void>("set_audio_deck_cue", { deck, enabled });
+}
+
+export function setAudioDeckFxChain(deck: DeckId, effects: DeckFxConfig[]) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("set_audio_deck_fx_chain", { deck, effects });
+}
+
+export function clearAudioDeckFx(deck: DeckId) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("clear_audio_deck_fx", { deck });
 }
 
 export function setAudioMasterVolume(volume: number) {
