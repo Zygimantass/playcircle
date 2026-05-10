@@ -6,6 +6,10 @@ export function loadAudioDeck(deck: DeckId, path: string) {
   return invoke<void>("load_audio_deck", { deck, path });
 }
 
+export function loadAudioWaveform(path: string, bins = 512) {
+  return invoke<Array<[number, number]>>("load_audio_waveform", { path, bins });
+}
+
 export function playAudioDeck(deck: DeckId) {
   return invoke<void>("play_audio_deck", { deck });
 }

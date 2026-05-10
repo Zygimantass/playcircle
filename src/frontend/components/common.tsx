@@ -1,6 +1,10 @@
 import { useId } from "react";
 import type { Track } from "../designTypes";
 
+const BEATS_PER_BAR = 4;
+export const DEFAULT_BEAT_WAVEFORM_BEATS = 16 * BEATS_PER_BAR;
+const BEAT_WAVEFORM_SAMPLES = 640;
+
 export function classNames(...items: Array<string | false | null | undefined>) {
   return items.filter(Boolean).join(" ");
 }
@@ -77,13 +81,17 @@ export function Waveform({
   height = 56,
   playhead = 0.32,
   variant = "beat",
-  showBeatGrid = false
+  showBeatGrid = false,
+  beatWindowBeats = DEFAULT_BEAT_WAVEFORM_BEATS,
+  beatWindowSeconds
 }: {
   track: Track;
   height?: number | string;
   playhead?: number;
   variant?: "beat" | "overview";
   showBeatGrid?: boolean;
+  beatWindowBeats?: number;
+  beatWindowSeconds?: number;
 }) {
   const width = 280;
   const clipId = `wave-played-${useId().replace(/:/g, "")}`;
@@ -94,7 +102,7 @@ export function Waveform({
   const beatGrid = showBeatGrid ? track.beatGrid ?? [] : [];
   const windowRange = isOverview
     ? { startSec: 0, endSec: track.totalSec }
-    : eightBeatWindow(track, beatGrid, currentSec);
+    : beatWaveformWindow(track, beatGrid, currentSec, beatWindowBeats, beatWindowSeconds);
   const windowSpan = Math.max(0.001, windowRange.endSec - windowRange.startSec);
   const playheadX = isOverview ? playhead * width : ((currentSec - windowRange.startSec) / windowSpan) * width;
   const rawDisplaySamples = isOverview
@@ -104,10 +112,10 @@ export function Waveform({
         x: index * (width / track.waveform.length),
         sampleSec: (index / Math.max(1, track.waveform.length - 1)) * track.totalSec
       }))
-    : Array.from({ length: 220 }, (_, index) => {
-        const ratio = index / 219;
+    : Array.from({ length: BEAT_WAVEFORM_SAMPLES }, (_, index) => {
+        const ratio = index / (BEAT_WAVEFORM_SAMPLES - 1);
         const sampleSec = windowRange.startSec + ratio * windowSpan;
-        const [low, high] = texturedWaveformSample(track, beatGrid, sampleSec);
+        const [low, high] = waveformSample(track, beatGrid, sampleSec);
         return {
           low,
           high,
@@ -191,12 +199,19 @@ export function Waveform({
   );
 }
 
-export function waveformClickPosition(track: Track, playhead: number, clickRatio: number, variant: "beat" | "overview") {
+export function waveformClickPosition(
+  track: Track,
+  playhead: number,
+  clickRatio: number,
+  variant: "beat" | "overview",
+  beatWindowBeats = DEFAULT_BEAT_WAVEFORM_BEATS,
+  beatWindowSeconds?: number
+) {
   const boundedClick = Math.max(0, Math.min(1, clickRatio));
   if (variant === "overview") return boundedClick;
 
   const currentSec = Math.max(0, Math.min(track.totalSec, playhead * track.totalSec));
-  const windowRange = eightBeatWindow(track, track.beatGrid ?? [], currentSec);
+  const windowRange = beatWaveformWindow(track, track.beatGrid ?? [], currentSec, beatWindowBeats, beatWindowSeconds);
   const windowSpan = Math.max(0.001, windowRange.endSec - windowRange.startSec);
   const nextSec = windowRange.startSec + boundedClick * windowSpan;
 
@@ -250,16 +265,26 @@ function point(point: { x: number; y: number }) {
   return `${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
 }
 
-function eightBeatWindow(track: Track, beatGrid: NonNullable<Track["beatGrid"]>, currentSec: number) {
+function beatWaveformWindow(
+  track: Track,
+  beatGrid: NonNullable<Track["beatGrid"]>,
+  currentSec: number,
+  beatWindowBeats: number,
+  beatWindowSeconds?: number
+) {
+  const displayBeats = Math.max(1, Math.floor(beatWindowBeats));
   const beatInterval = track.bpm > 0 ? 60 / track.bpm : 0.5;
-  let span = beatInterval * 8;
+  let span = beatWindowSeconds !== undefined && Number.isFinite(beatWindowSeconds) && beatWindowSeconds > 0
+    ? beatWindowSeconds
+    : beatInterval * displayBeats;
 
-  if (beatGrid.length >= 2) {
+  if (beatWindowSeconds === undefined && beatGrid.length >= 2) {
     const nextBeatIndex = beatGrid.findIndex((beat) => beat.timeSec >= currentSec);
     const centerIndex = nextBeatIndex === -1 ? beatGrid.length - 1 : nextBeatIndex;
-    const startIndex = Math.max(0, centerIndex - 4);
-    const endIndex = Math.min(beatGrid.length - 1, startIndex + 8);
-    const adjustedStartIndex = Math.max(0, endIndex - 8);
+    const beatsBeforePlayhead = Math.floor(displayBeats / 2);
+    const startIndex = Math.max(0, centerIndex - beatsBeforePlayhead);
+    const endIndex = Math.min(beatGrid.length - 1, startIndex + displayBeats);
+    const adjustedStartIndex = Math.max(0, endIndex - displayBeats);
     const startSec = beatGrid[adjustedStartIndex]?.timeSec;
     const endSec = beatGrid[endIndex]?.timeSec;
 
@@ -300,6 +325,12 @@ function texturedWaveformSample(track: Track, beatGrid: NonNullable<Track["beatG
   const high = Math.max(0.05, Math.min(1, sourceHigh * highTexture + sixteenthPulse + beatPulse * 0.24));
 
   return [low, high];
+}
+
+function waveformSample(track: Track, beatGrid: NonNullable<Track["beatGrid"]>, sampleSec: number): [number, number] {
+  if (track.waveformSource === "audio") return interpolatedWaveformSample(track, sampleSec);
+
+  return texturedWaveformSample(track, beatGrid, sampleSec);
 }
 
 function beatPosition(track: Track, beatGrid: NonNullable<Track["beatGrid"]>, sampleSec: number) {

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use playcircle_audio::{AudioEngine, DeckId};
+use playcircle_audio::{decoder::decode_file, AudioEngine, DeckId};
 use playcircle_rekordbox::{RekordboxBeat, RekordboxDatabase, RekordboxLibrary, RekordboxTrack};
 
 struct AudioEngineState(Mutex<Option<AudioEngine>>);
@@ -46,6 +46,42 @@ fn load_rekordbox_beat_grid(
 
 fn default_demo_database_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../playcircle-rekordbox-demo/master.db")
+}
+
+#[tauri::command]
+fn load_audio_waveform(path: String, bins: Option<usize>) -> Result<Vec<(f32, f32)>, String> {
+    let bins = bins.unwrap_or(512).clamp(32, 4096);
+    let frames = decode_file(PathBuf::from(&path).as_path(), 44_100)?;
+    Ok(audio_waveform(&frames, bins))
+}
+
+fn audio_waveform(frames: &[[f32; 2]], bins: usize) -> Vec<(f32, f32)> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    let frames_per_bin = frames.len().div_ceil(bins).max(1);
+    (0..bins)
+        .map(|index| {
+            let start = index * frames_per_bin;
+            let end = ((index + 1) * frames_per_bin).min(frames.len());
+            let chunk = &frames[start..end];
+            if chunk.is_empty() {
+                return (0.0, 0.0);
+            }
+
+            let mut peak = 0.0_f32;
+            let mut sum = 0.0_f32;
+            for frame in chunk {
+                let sample = frame[0].abs().max(frame[1].abs());
+                peak = peak.max(sample);
+                sum += sample;
+            }
+
+            let average = sum / chunk.len() as f32;
+            ((average * 1.8).clamp(0.0, 1.0), peak.clamp(0.0, 1.0))
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -158,6 +194,7 @@ pub fn run() {
             load_rekordbox_tracks,
             load_rekordbox_library,
             load_rekordbox_beat_grid,
+            load_audio_waveform,
             load_audio_deck,
             play_audio_deck,
             pause_audio_deck,

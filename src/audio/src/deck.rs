@@ -110,8 +110,9 @@ impl Deck {
         self.drain_decoder_messages();
         let ratio = ratio.clamp(0.0, 1.0);
         let seekable_frames = self.seekable_frames();
-        let target_frame = (seekable_frames as f32 * ratio).round() as u64;
-        self.played_frames = target_frame.min(seekable_frames);
+        let max_playable_frame = seekable_frames.saturating_sub(1);
+        let target_frame = (max_playable_frame as f32 * ratio).round() as u64;
+        self.played_frames = target_frame.min(max_playable_frame);
         self.filter = OnePoleLowPass::new(self.filter_sample_rate());
     }
 
@@ -227,7 +228,7 @@ mod tests {
         deck.load(vec![[0.0, 0.0]; 100]);
 
         deck.set_position_ratio(2.0);
-        assert_eq!(deck.position_ratio(), 1.0);
+        assert!((deck.position_ratio() - 0.99).abs() < 0.001);
 
         deck.set_position_ratio(-1.0);
         assert_eq!(deck.position_ratio(), 0.0);
@@ -250,7 +251,7 @@ mod tests {
 
         deck.set_position_ratio(1.0);
 
-        assert_eq!(deck.position_ratio(), 1.0);
-        assert_eq!(deck.played_frames, 200);
+        assert!((deck.position_ratio() - 0.995).abs() < 0.001);
+        assert_eq!(deck.played_frames, 199);
     }
 }

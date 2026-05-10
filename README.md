@@ -26,17 +26,13 @@ Open http://localhost:1420 in your browser.
 
 ## Run the Desktop App
 
-Start the Tauri desktop app:
+Start the Tauri desktop app with Vite hot reload:
 
 ```sh
 npm run tauri:dev
 ```
 
-For a faster frontend development loop, run Tauri with Vite hot reload:
-
-```sh
-npm run tauri:dev:hot
-```
+Frontend changes hot reload through Vite. Rust/Tauri changes are watched by `tauri dev` and restart the app process.
 
 ## Build
 

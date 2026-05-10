@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.playcircle.app",
   "build": {
-    "beforeDevCommand": "npm run build && npm run preview",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../../dist"

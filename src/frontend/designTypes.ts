@@ -33,6 +33,7 @@ export type Track = {
   analysisDataPath: string | null;
   fileSize: string;
   waveform: Array<[number, number]>;
+  waveformSource?: "placeholder" | "audio";
   energyCurve: number[];
   cues: Cue[];
   beatGrid?: BeatGridMarker[];

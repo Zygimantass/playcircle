@@ -97,6 +97,7 @@ function toUiTrack(track: RekordboxTrackDto, index: number): Track {
     analysisDataPath: track.analysis_data_path,
     fileSize: formatFileSize(track.file_size),
     waveform: makeWaveform(index * 137 + 7),
+    waveformSource: "placeholder",
     energyCurve: makeEnergyCurve(index * 91 + 13),
     cues: [],
     beatGrid: (track.beat_grid ?? []).map((beat) => ({

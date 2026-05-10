@@ -5,7 +5,7 @@ import { PlayerDock } from "./components/PlayerDock";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { TrackTable } from "./components/TrackTable";
-import { loadAudioDeck, pauseAudioDeck, playAudioDeck, seekAudioDeck, setAudioDeckCue, setAudioDeckFilter, setAudioDeckVolume, setAudioMasterVolume, type DeckId } from "./api/audio";
+import { loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, seekAudioDeck, setAudioDeckCue, setAudioDeckFilter, setAudioDeckVolume, setAudioMasterVolume, type DeckId } from "./api/audio";
 import { loadRekordboxBeatGrid, loadRekordboxLibrary } from "./api/rekordbox";
 import { withRekordboxLibrary } from "./data/libraryMapping";
 import type { CurrentNode, PcData, PlaylistEntry, SortableTrackKey, SortState, Track } from "./designTypes";
@@ -185,27 +185,59 @@ export function App() {
     };
   }, []);
 
+  const loadWaveformForTrack = useCallback(async (track: Track) => {
+    if (track.waveformSource === "audio" || !track.filePath) return track;
+
+    const waveform = await loadAudioWaveform(track.filePath, 512);
+    if (waveform.length === 0) return track;
+
+    return {
+      ...track,
+      waveform,
+      waveformSource: "audio" as const,
+      energyCurve: sampleEnergyCurve(waveform, 24)
+    };
+  }, []);
+
+  const loadAnalysisForTrack = useCallback(async (track: Track) => {
+    const [trackWithBeatGrid, trackWithWaveform] = await Promise.all([
+      loadBeatGridForTrack(track),
+      loadWaveformForTrack(track)
+    ]);
+
+    if (trackWithBeatGrid === track && trackWithWaveform === track) return track;
+
+    return {
+      ...trackWithBeatGrid,
+      waveform: trackWithWaveform.waveform,
+      waveformSource: trackWithWaveform.waveformSource,
+      energyCurve: trackWithWaveform.energyCurve
+    };
+  }, [loadBeatGridForTrack, loadWaveformForTrack]);
+
   const loadDeck = useCallback((deck: DeckId, track: Track) => {
     if (deck === "A") setDeckATrack(track);
     else setDeckBTrack(track);
     setDeckPositions((positions) => ({ ...positions, [deck]: 0 }));
     setDeckPlaying((playing) => ({ ...playing, [deck]: false }));
     ensureDeckLoaded(deck, track).catch(reportAudioError);
-    loadBeatGridForTrack(track)
-      .then((trackWithBeatGrid) => {
-        if (deck === "A") setDeckATrack(trackWithBeatGrid);
-        else setDeckBTrack(trackWithBeatGrid);
+    loadAnalysisForTrack(track)
+      .then((trackWithAnalysis) => {
+        if (deck === "A") setDeckATrack(trackWithAnalysis);
+        else setDeckBTrack(trackWithAnalysis);
       })
       .catch(reportAudioError);
-  }, [ensureDeckLoaded, loadBeatGridForTrack, reportAudioError]);
+  }, [ensureDeckLoaded, loadAnalysisForTrack, reportAudioError]);
 
   const setDeckPlayback = useCallback((deck: DeckId, playing: boolean) => {
     const track = deck === "A" ? deckATrack : deckBTrack;
+    const requestedPosition = deck === "A" ? deckPositions.A : deckPositions.B;
     setDeckPlaying((current) => ({ ...current, [deck]: playing }));
 
     const command = async () => {
       if (playing) {
         await ensureDeckLoaded(deck, track);
+        await seekAudioDeck(deck, requestedPosition);
         await playAudioDeck(deck);
         setAudioStatus(`Deck ${deck} playing`);
       } else {
@@ -218,7 +250,7 @@ export function App() {
       setDeckPlaying((current) => ({ ...current, [deck]: false }));
       reportAudioError(error);
     });
-  }, [deckATrack, deckBTrack, ensureDeckLoaded, reportAudioError]);
+  }, [deckATrack, deckBTrack, deckPositions.A, deckPositions.B, ensureDeckLoaded, reportAudioError]);
 
   const setDeckPosition = useCallback((deck: DeckId, position: number) => {
     setDeckPositions((current) => ({ ...current, [deck]: position }));
@@ -259,22 +291,22 @@ export function App() {
           setDeckPlaying((playing) => ({ ...playing, A: false }));
           reportAudioError(error);
         });
-      loadBeatGridForTrack(track)
+      loadAnalysisForTrack(track)
         .then(setDeckATrack)
         .catch(reportAudioError);
     }
-  }, [ensureDeckLoaded, loadBeatGridForTrack, reportAudioError]);
+  }, [ensureDeckLoaded, loadAnalysisForTrack, reportAudioError]);
 
   useEffect(() => {
     if (libraryStatus !== "rekordbox") return undefined;
 
     let cancelled = false;
-    loadBeatGridForTrack(deckATrack)
+    loadAnalysisForTrack(deckATrack)
       .then((track) => {
         if (!cancelled && track !== deckATrack) setDeckATrack(track);
       })
       .catch(reportAudioError);
-    loadBeatGridForTrack(deckBTrack)
+    loadAnalysisForTrack(deckBTrack)
       .then((track) => {
         if (!cancelled && track !== deckBTrack) setDeckBTrack(track);
       })
@@ -283,7 +315,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [deckATrack, deckBTrack, libraryStatus, loadBeatGridForTrack, reportAudioError]);
+  }, [deckATrack, deckBTrack, libraryStatus, loadAnalysisForTrack, reportAudioError]);
 
   return (
     <div className="grid h-screen grid-rows-[32px_1fr] bg-bg" data-screen-label={mode === "library" ? "Library" : "Mix"}>
@@ -369,6 +401,16 @@ export function App() {
       )}
     </div>
   );
+}
+
+function sampleEnergyCurve(waveform: Array<[number, number]>, count: number) {
+  if (waveform.length === 0) return [];
+
+  return Array.from({ length: count }, (_, index) => {
+    const ratio = count === 1 ? 0 : index / (count - 1);
+    const sampleIndex = Math.min(waveform.length - 1, Math.round(ratio * (waveform.length - 1)));
+    return waveform[sampleIndex]?.[1] ?? 0;
+  });
 }
 
 function LibraryWorkspace({
