@@ -10,6 +10,16 @@ load tracks to two decks, inspect metadata and waveforms, play audio, seek
 through tracks, adjust deck levels and filters, and work with Rekordbox-derived
 library data while the native playback and library engine continues to mature.
 
+## Screenshots
+
+### Library
+
+![Playcircle library view](docs/screenshots/library.png)
+
+### Mix
+
+![Playcircle mix view](docs/screenshots/mix.png)
+
 ## Functionality
 
 - Library browsing with track metadata, playlists/crates, search, filtering,
