@@ -4,9 +4,235 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Playcircle</title>
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        overflow: hidden;
+        background: #0c0d10;
+        color: #d6d7da;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 12px;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .pc-boot {
+        display: grid;
+        height: 100%;
+        grid-template-rows: 32px 1fr;
+        background: #0c0d10;
+      }
+
+      .pc-boot-top {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        align-items: center;
+        border-bottom: 1px solid #1d1f25;
+        background: linear-gradient(#131418, #111216);
+        padding: 0 12px;
+      }
+
+      .pc-boot-brand,
+      .pc-boot-modes,
+      .pc-boot-search,
+      .pc-boot-sidebar-head,
+      .pc-boot-row {
+        display: flex;
+        align-items: center;
+      }
+
+      .pc-boot-brand {
+        gap: 8px;
+        color: #d6d7da;
+        font-weight: 650;
+        letter-spacing: 0.04em;
+      }
+
+      .pc-boot-mark {
+        width: 14px;
+        height: 14px;
+        border: 1px solid #cdb46a;
+        border-radius: 50%;
+        box-shadow: inset 0 0 0 4px #0c0d10;
+        background: #cdb46a;
+      }
+
+      .pc-boot-modes {
+        gap: 1px;
+        margin-left: 18px;
+      }
+
+      .pc-boot-mode {
+        border-radius: 4px;
+        padding: 4px 10px;
+        color: #8a8d96;
+        font-size: 11px;
+      }
+
+      .pc-boot-mode:first-child {
+        background: #1c1f26;
+        color: #d6d7da;
+      }
+
+      .pc-boot-search {
+        min-width: 380px;
+        justify-content: space-between;
+        border: 1px solid #262932;
+        border-radius: 5px;
+        background: #16181d;
+        padding: 4px 8px 4px 10px;
+        color: #5b5e67;
+        font-size: 11px;
+      }
+
+      .pc-boot-main {
+        display: grid;
+        min-height: 0;
+        grid-template-columns: 220px 1fr 304px;
+      }
+
+      .pc-boot-sidebar,
+      .pc-boot-center,
+      .pc-boot-inspector {
+        min-height: 0;
+        border-right: 1px solid #1d1f25;
+        background: #111216;
+      }
+
+      .pc-boot-center {
+        display: grid;
+        grid-template-rows: 32px 1fr 22px;
+        background: #0c0d10;
+      }
+
+      .pc-boot-sidebar-head,
+      .pc-boot-filter,
+      .pc-boot-footer {
+        border-bottom: 1px solid #1d1f25;
+        padding: 0 12px;
+        color: #8a8d96;
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10px;
+      }
+
+      .pc-boot-sidebar-head,
+      .pc-boot-filter {
+        height: 32px;
+      }
+
+      .pc-boot-footer {
+        display: flex;
+        height: 22px;
+        align-items: center;
+        border-top: 1px solid #1d1f25;
+        border-bottom: 0;
+        background: #111216;
+      }
+
+      .pc-boot-list {
+        display: grid;
+        gap: 3px;
+        padding: 10px;
+      }
+
+      .pc-boot-pill,
+      .pc-boot-line,
+      .pc-boot-cell {
+        border-radius: 3px;
+        background: #1c1f26;
+      }
+
+      .pc-boot-pill {
+        height: 24px;
+      }
+
+      .pc-boot-table {
+        display: grid;
+        gap: 1px;
+        padding-top: 1px;
+      }
+
+      .pc-boot-row {
+        height: 28px;
+        gap: 18px;
+        border-bottom: 1px solid #1d1f25;
+        padding: 0 12px;
+      }
+
+      .pc-boot-cell {
+        height: 8px;
+      }
+
+      .pc-boot-cell:nth-child(1) {
+        width: 34%;
+      }
+
+      .pc-boot-cell:nth-child(2) {
+        width: 20%;
+      }
+
+      .pc-boot-cell:nth-child(3) {
+        width: 8%;
+      }
+
+      .pc-boot-inspector {
+        border-right: 0;
+        background: #111216;
+        padding: 14px;
+      }
+
+      .pc-boot-line {
+        height: 9px;
+        margin-bottom: 10px;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="pc-boot" aria-label="Playcircle loading">
+        <div class="pc-boot-top">
+          <div style="display: flex; align-items: center;">
+            <div class="pc-boot-brand"><span class="pc-boot-mark"></span><span>playcircle</span></div>
+            <div class="pc-boot-modes"><span class="pc-boot-mode">Library</span><span class="pc-boot-mode">Mix</span></div>
+          </div>
+          <div class="pc-boot-search"><span>⌕ Loading library</span><span>⌘K</span></div>
+          <div></div>
+        </div>
+        <div class="pc-boot-main">
+          <aside class="pc-boot-sidebar">
+            <div class="pc-boot-sidebar-head">LIBRARY</div>
+            <div class="pc-boot-list">
+              <div class="pc-boot-pill"></div>
+              <div class="pc-boot-pill"></div>
+              <div class="pc-boot-pill"></div>
+              <div class="pc-boot-pill"></div>
+            </div>
+          </aside>
+          <main class="pc-boot-center">
+            <div class="pc-boot-filter">All Tracks</div>
+            <div class="pc-boot-table">
+              <div class="pc-boot-row"><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span></div>
+              <div class="pc-boot-row"><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span></div>
+              <div class="pc-boot-row"><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span></div>
+              <div class="pc-boot-row"><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span></div>
+              <div class="pc-boot-row"><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span></div>
+              <div class="pc-boot-row"><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span><span class="pc-boot-cell"></span></div>
+            </div>
+            <div class="pc-boot-footer">Loading</div>
+          </main>
+          <aside class="pc-boot-inspector">
+            <div class="pc-boot-line" style="width: 74%;"></div>
+            <div class="pc-boot-line" style="width: 48%;"></div>
+            <div class="pc-boot-line" style="width: 62%;"></div>
+          </aside>
+        </div>
+      </div>
+    </div>
     <script src="/pc-data.js"></script>
     <script type="module" src="/main.tsx"></script>
   </body>

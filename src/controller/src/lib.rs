@@ -62,6 +62,14 @@ pub enum ControllerAction {
         shifted: bool,
         pressed: bool,
     },
+    BeatSync {
+        deck: ControllerDeck,
+        pressed: bool,
+    },
+    TempoRange {
+        deck: ControllerDeck,
+        pressed: bool,
+    },
     Tempo {
         deck: ControllerDeck,
         value: f32,
@@ -91,7 +99,7 @@ pub enum ControllerAction {
         direction: i8,
         pressed: bool,
     },
-    FxFocus {
+    FxBeat {
         direction: i8,
         pressed: bool,
     },
@@ -439,6 +447,14 @@ impl Flx4Mapper {
                 deck,
                 pressed: velocity > 0,
             },
+            0x58 => ControllerAction::BeatSync {
+                deck,
+                pressed: velocity > 0,
+            },
+            0x60 => ControllerAction::TempoRange {
+                deck,
+                pressed: velocity > 0,
+            },
             0x0b => ControllerAction::PlayPause {
                 deck,
                 pressed: velocity > 0,
@@ -467,11 +483,11 @@ impl Flx4Mapper {
                 direction: -1,
                 pressed,
             }),
-            (4, 0x4a) => Some(ControllerAction::FxFocus {
+            (4, 0x4a) => Some(ControllerAction::FxBeat {
                 direction: -1,
                 pressed,
             }),
-            (4, 0x4b) => Some(ControllerAction::FxFocus {
+            (4, 0x4b) => Some(ControllerAction::FxBeat {
                 direction: 1,
                 pressed,
             }),
@@ -792,6 +808,32 @@ mod tests {
     }
 
     #[test]
+    fn flx4_maps_sync_and_shift_sync() {
+        let mut mapper = Flx4Mapper::new();
+        assert_eq!(
+            mapper.map(&midi(0x90, 0x58, 0x7f)),
+            ControllerAction::BeatSync {
+                deck: ControllerDeck::A,
+                pressed: true
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x91, 0x58, 0x00)),
+            ControllerAction::BeatSync {
+                deck: ControllerDeck::B,
+                pressed: false
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x90, 0x60, 0x7f)),
+            ControllerAction::TempoRange {
+                deck: ControllerDeck::A,
+                pressed: true
+            }
+        );
+    }
+
+    #[test]
     fn flx4_maps_eq_and_volume_controls() {
         let mut mapper = Flx4Mapper::new();
         assert_eq!(
@@ -871,14 +913,14 @@ mod tests {
         );
         assert_eq!(
             mapper.map(&midi(0x94, 0x4a, 0x7f)),
-            ControllerAction::FxFocus {
+            ControllerAction::FxBeat {
                 direction: -1,
                 pressed: true
             }
         );
         assert_eq!(
             mapper.map(&midi(0x94, 0x4b, 0x7f)),
-            ControllerAction::FxFocus {
+            ControllerAction::FxBeat {
                 direction: 1,
                 pressed: true
             }

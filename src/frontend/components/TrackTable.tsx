@@ -19,7 +19,7 @@ type TrackTableProps = {
 };
 
 const cols: Array<{ id: SortableTrackKey | "idx" | "compat"; label: string; w: string; align: "left" | "right" | "center"; sortable: boolean }> = [
-  { id: "idx", label: "#", w: "32px", align: "right", sortable: false },
+  { id: "idx", label: "#", w: "44px", align: "right", sortable: false },
   { id: "compat", label: "", w: "16px", align: "center", sortable: false },
   { id: "title", label: "Title", w: "minmax(220px,2fr)", align: "left", sortable: true },
   { id: "artist", label: "Artist", w: "minmax(140px,1fr)", align: "left", sortable: true },
@@ -31,12 +31,11 @@ const cols: Array<{ id: SortableTrackKey | "idx" | "compat"; label: string; w: s
   { id: "energy", label: "Energy", w: "72px", align: "left", sortable: true },
   { id: "rating", label: "★", w: "60px", align: "left", sortable: true },
   { id: "plays", label: "↻", w: "32px", align: "right", sortable: true },
-  { id: "added", label: "Added", w: "80px", align: "left", sortable: true },
-  { id: "fileType", label: "Fmt", w: "38px", align: "left", sortable: true }
+  { id: "added", label: "Added", w: "80px", align: "left", sortable: true }
 ];
 
 const rowHeight = 26;
-const overscan = 5;
+const overscan = 10;
 
 export function TrackTable({ tracks, controllerFocused, sort, setSort, selected, setSelected, multiSelected, setMultiSelected, hoveredId, setHoveredId, onPreview, baseTrack }: TrackTableProps) {
   const data = window.PC_DATA;
@@ -45,8 +44,8 @@ export function TrackTable({ tracks, controllerFocused, sort, setSort, selected,
   const [viewportHeight, setViewportHeight] = useState(0);
   const gridTemplateColumns = cols.map((col) => col.w).join(" ");
   const visibleRange = useMemo(() => {
-    const start = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
-    const count = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+    const start = Math.max(0, Math.ceil(scrollTop / rowHeight));
+    const count = Math.ceil(viewportHeight / rowHeight) + overscan;
     const end = Math.min(tracks.length, start + count);
     return { start, end };
   }, [scrollTop, tracks.length, viewportHeight]);
@@ -75,13 +74,16 @@ export function TrackTable({ tracks, controllerFocused, sort, setSort, selected,
     const rowBottom = rowTop + rowHeight;
     if (rowTop < element.scrollTop) {
       element.scrollTop = rowTop;
+      setScrollTop(rowTop);
     } else if (rowBottom > element.scrollTop + element.clientHeight) {
-      element.scrollTop = rowBottom - element.clientHeight;
+      const nextScrollTop = rowBottom - element.clientHeight;
+      element.scrollTop = nextScrollTop;
+      setScrollTop(nextScrollTop);
     }
   }, [selected, tracks]);
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[24px_minmax(0,1fr)] overflow-hidden bg-bg">
+    <div className="grid h-full min-h-0 grid-rows-[24px_minmax(0,1fr)] overflow-hidden bg-bg pl-2">
       <div className="sticky top-0 z-10 grid h-6 items-center border-b border-line bg-surface-1" style={{ gridTemplateColumns }}>
         {cols.map((col) => (
           <button
@@ -225,7 +227,6 @@ const TrackRow = memo(function TrackRow({
       <div className={classNames(ui.tableCell, "justify-start")}><StarRating value={track.rating} /></div>
       <Cell right mono dim2>{formatPlays(track.plays)}</Cell>
       <Cell mono dim2>{track.added.slice(2).replace(/-/g, "·")}</Cell>
-      <Cell mono dim>{track.fileType}</Cell>
     </div>
   );
 });

@@ -27,6 +27,8 @@ export type ControllerAction =
   | { type: "loadSelected"; deck: ControllerDeck }
   | { type: "browse"; ticks: number; shifted: boolean }
   | { type: "browsePress"; shifted: boolean; pressed: boolean }
+  | { type: "beatSync"; deck: ControllerDeck; pressed: boolean }
+  | { type: "tempoRange"; deck: ControllerDeck; pressed: boolean }
   | { type: "tempo"; deck: ControllerDeck; value: number }
   | { type: "volume"; deck: ControllerDeck; value: number }
   | { type: "crossfader"; value: number }
@@ -34,7 +36,7 @@ export type ControllerAction =
   | { type: "filter"; deck: ControllerDeck; value: number }
   | { type: "hotCue"; deck: ControllerDeck; index: number; pressed: boolean }
   | { type: "fxSelect"; direction: number; pressed: boolean }
-  | { type: "fxFocus"; direction: number; pressed: boolean }
+  | { type: "fxBeat"; direction: number; pressed: boolean }
   | { type: "fxTarget"; target: FxTarget }
   | { type: "fxDepth"; value: number }
   | { type: "fxToggle"; pressed: boolean }

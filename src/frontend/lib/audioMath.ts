@@ -79,19 +79,29 @@ export function syncedPositionForDeck(
   const followerTrack = follower === "A" ? deckATrack : deckBTrack;
   const masterPositionSec = deckPositions[master] * masterTrack.totalSec;
   const followerPositionSec = deckPositions[follower] * followerTrack.totalSec;
-  const masterPhase = beatPhaseAt(masterTrack, masterPositionSec);
-  const followerSegment = beatSegmentAt(followerTrack, followerPositionSec);
-  const nextFollowerSec = followerSegment.startSec + masterPhase * followerSegment.spanSec;
+  const masterBeat = beatAt(masterTrack, masterPositionSec);
+  const followerSegment = matchingFollowerSegment(followerTrack, followerPositionSec, masterBeat);
+  const nextFollowerSec = followerSegment.startSec + masterBeat.phase * followerSegment.spanSec;
 
   return clamp(nextFollowerSec / followerTrack.totalSec, 0, 1);
 }
 
-function beatPhaseAt(track: Track, positionSec: number) {
+type BeatSegment = {
+  startSec: number;
+  spanSec: number;
+  beatNumber: number;
+  phase: number;
+};
+
+function beatAt(track: Track, positionSec: number): BeatSegment {
   const segment = beatSegmentAt(track, positionSec);
-  return clamp((positionSec - segment.startSec) / segment.spanSec, 0, 1);
+  return {
+    ...segment,
+    phase: clamp((positionSec - segment.startSec) / segment.spanSec, 0, 1)
+  };
 }
 
-function beatSegmentAt(track: Track, positionSec: number) {
+function beatSegmentAt(track: Track, positionSec: number): BeatSegment {
   const beatGrid = track.beatGrid ?? [];
   if (beatGrid.length >= 2) {
     const nextIndex = beatGrid.findIndex((beat) => beat.timeSec > positionSec);
@@ -100,13 +110,54 @@ function beatSegmentAt(track: Track, positionSec: number) {
     const next = beatGrid[Math.min(beatGrid.length - 1, currentIndex + 1)];
     return {
       startSec: current.timeSec,
-      spanSec: Math.max(0.001, next.timeSec - current.timeSec)
+      spanSec: Math.max(0.001, next.timeSec - current.timeSec),
+      beatNumber: current.beatNumber,
+      phase: 0
     };
   }
 
   const spanSec = track.bpm > 0 ? 60 / track.bpm : 0.5;
+  const beatIndex = Math.floor(positionSec / spanSec);
   return {
     startSec: Math.floor(positionSec / spanSec) * spanSec,
-    spanSec
+    spanSec,
+    beatNumber: beatIndex % 4 + 1,
+    phase: 0
   };
+}
+
+function matchingFollowerSegment(followerTrack: Track, followerPositionSec: number, masterBeat: BeatSegment): BeatSegment {
+  const beatGrid = followerTrack.beatGrid ?? [];
+  if (beatGrid.length < 2) return beatSegmentAt(followerTrack, followerPositionSec);
+
+  const masterBeatNumber = normalizeBeatNumber(masterBeat.beatNumber);
+  let bestSegment: BeatSegment | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < beatGrid.length - 1; index += 1) {
+    const current = beatGrid[index];
+    if (normalizeBeatNumber(current.beatNumber) !== masterBeatNumber) continue;
+
+    const next = beatGrid[index + 1];
+    const candidateStart = current.timeSec;
+    const candidateSpan = Math.max(0.001, next.timeSec - current.timeSec);
+    const candidateSec = candidateStart + masterBeat.phase * candidateSpan;
+    const distance = Math.abs(candidateSec - followerPositionSec);
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestSegment = {
+        startSec: candidateStart,
+        spanSec: candidateSpan,
+        beatNumber: current.beatNumber,
+        phase: 0
+      };
+    }
+  }
+
+  return bestSegment ?? beatSegmentAt(followerTrack, followerPositionSec);
+}
+
+function normalizeBeatNumber(beatNumber: number) {
+  return ((Math.max(1, Math.round(beatNumber)) - 1) % 4) + 1;
 }

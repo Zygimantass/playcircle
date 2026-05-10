@@ -76,8 +76,8 @@ function SidebarItem({
     >
       {color && <span className="size-2 shrink-0 rounded-sm" style={{ background: color }} />}
       {icon && <span className="w-3 text-center text-[11px] text-text-3">{icon}</span>}
-      <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">{label}</span>
-      {count != null && <span className="font-mono text-[10px] text-text-3">{count}</span>}
+      <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">{label}</span>
+      {count != null && <span className="ml-3 min-w-7 text-right font-mono text-[10px] text-text-3">{count}</span>}
     </button>
   );
 }
@@ -154,8 +154,8 @@ function PlaylistTreeItem({
         >
           {playlist.isFolder ? <FolderGlyph /> : "≡"}
         </span>
-        <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">{playlist.name}</span>
-        <span className="font-mono text-[10px] text-text-3">{playlist.count}</span>
+        <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">{playlist.name}</span>
+        <span className="ml-3 min-w-7 text-right font-mono text-[10px] text-text-3">{playlist.count}</span>
       </button>
       {open && hasChildren && (
         <div>

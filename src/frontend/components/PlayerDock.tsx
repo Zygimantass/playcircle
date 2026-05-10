@@ -189,6 +189,7 @@ function BeatWaveformDeck({
     <section className="min-h-0 min-w-0 border-b border-line last:border-b-0">
       <button
         ref={setNodeRef}
+        data-deck-drop={deck}
         data-testid={`deck-${deck}-beat-drop`}
         className={classNames("relative h-full min-h-0 w-full min-w-0 cursor-grab touch-none overflow-hidden bg-[#07080b] text-left active:cursor-grabbing", isOver && "outline outline-1 -outline-offset-1 outline-accent")}
         onPointerDown={(event) => {
@@ -281,6 +282,7 @@ function DeckControls({
   return (
     <section
       ref={setNodeRef}
+      data-deck-drop={deck}
       data-testid={`deck-${deck}-drop`}
       className={classNames("grid min-h-0 min-w-0 grid-rows-[44px_minmax(0,1fr)] overflow-hidden border-r border-line bg-gradient-to-b from-surface-1 to-[#0d0e12] last:border-r-0", isOver && "outline outline-1 -outline-offset-1 outline-accent")}
     >

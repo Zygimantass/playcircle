@@ -14,7 +14,7 @@ import { addRekordboxTracksToPlaylist, createRekordboxPlaylist, loadRekordboxBea
 import { withRekordboxLibrary } from "./data/libraryMapping";
 import type { CurrentNode, PcData, PlaylistEntry, Track } from "./designTypes";
 import { clamp, crossfadeGain, estimatedDeckLevelDb, nextTempoRange, otherDeck, playbackRateFromTempo, sampleEnergyCurve, smoothMeterDb, syncedPositionForDeck, syncedTempoForDeck } from "./lib/audioMath";
-import { CONTROLLER_FX_KINDS, cloneControllerFxState, controllerFxTarget, createControllerFxState, deckIdFromControllerAction, defaultControllerFxSlot, fxKindLabel, fxTargetLabel, sendControllerFxFeedback, wrapIndex, type ControllerFxDebugState, type ControllerFxState } from "./lib/controllerFx";
+import { CONTROLLER_FX_KINDS, adjustFxBeat, audioFxConfigForSlot, cloneControllerFxState, controllerFxTarget, createControllerFxState, deckIdFromControllerAction, defaultControllerFxSlot, fxKindLabel, fxTargetLabel, fxTimingLabel, sendControllerFxFeedback, wrapIndex, type ControllerFxDebugState, type ControllerFxState } from "./lib/controllerFx";
 import { deckFromDndDropId, deckFromDndTranslatedRect } from "./lib/dnd";
 import { currentNodesEqual, findPlaylist, findPlaylistParentNode, libraryBrowserNodes, movePlaylistEntry, playlistContains, recalculatePlaylistCounts, statusText, updatePlaylistEntries } from "./lib/library";
 import { useControllerPolling } from "./hooks/useControllerPolling";
@@ -691,6 +691,68 @@ export function App() {
     loadDeckByTrackId(deck, trackId);
   }, [addTracksToPlaylist, loadDeckByTrackId, movePlaylistToFolder]);
 
+  useEffect(() => {
+    type PointerDragState =
+      | { type: "track"; id: string; startX: number; startY: number }
+      | { type: "playlist"; id: string; startX: number; startY: number };
+
+    let dragState: PointerDragState | null = null;
+
+    const startDrag = (event: MouseEvent | PointerEvent) => {
+      if (event.button !== 0) return;
+      const target = event.target as HTMLElement | null;
+      const track = target?.closest<HTMLElement>("[data-track-id]");
+      if (track?.dataset.trackId) {
+        dragState = { type: "track", id: track.dataset.trackId, startX: event.clientX, startY: event.clientY };
+        return;
+      }
+
+      const playlist = target?.closest<HTMLElement>("[data-playlist-id][data-playlist-folder='false']");
+      if (playlist?.dataset.playlistId) {
+        dragState = { type: "playlist", id: playlist.dataset.playlistId, startX: event.clientX, startY: event.clientY };
+      }
+    };
+
+    const finishDrag = (event: MouseEvent | PointerEvent) => {
+      const state = dragState;
+      dragState = null;
+      if (!state) return;
+      if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) < 6) return;
+
+      const target = document.elementFromPoint(event.clientX, event.clientY);
+      if (state.type === "track") {
+        const playlist = target?.closest<HTMLElement>("[data-playlist-id][data-playlist-folder='false']");
+        if (playlist?.dataset.playlistId) {
+          addTracksToPlaylist(playlist.dataset.playlistId, state.id);
+          return;
+        }
+
+        const deckElement = target?.closest<HTMLElement>("[data-deck-drop]");
+        const deck = deckElement?.dataset.deckDrop;
+        if (deck === "A" || deck === "B") {
+          loadDeckByTrackId(deck, state.id);
+        }
+        return;
+      }
+
+      const folder = target?.closest<HTMLElement>("[data-playlist-id][data-playlist-folder='true']");
+      if (folder?.dataset.playlistId) {
+        movePlaylistToFolder(state.id, folder.dataset.playlistId);
+      }
+    };
+
+    window.addEventListener("pointerdown", startDrag, true);
+    window.addEventListener("pointerup", finishDrag, true);
+    window.addEventListener("mousedown", startDrag, true);
+    window.addEventListener("mouseup", finishDrag, true);
+    return () => {
+      window.removeEventListener("pointerdown", startDrag, true);
+      window.removeEventListener("pointerup", finishDrag, true);
+      window.removeEventListener("mousedown", startDrag, true);
+      window.removeEventListener("mouseup", finishDrag, true);
+    };
+  }, [addTracksToPlaylist, loadDeckByTrackId, movePlaylistToFolder]);
+
   const setDeckPlayback = useCallback((deck: DeckId, playing: boolean) => {
     const track = deck === "A" ? deckATrack : deckBTrack;
     const requestedPosition = deck === "A" ? deckPositions.A : deckPositions.B;
@@ -832,9 +894,9 @@ export function App() {
 
       const followerTrack = follower === "A" ? deckATrack : deckBTrack;
       const diffSec = Math.abs(targetPosition - positions[follower]) * followerTrack.totalSec;
-      if (diffSec < 0.012) return;
+      if (diffSec < 0.12) return;
       setDeckPosition(follower, targetPosition);
-    }, 125);
+    }, 1_000);
 
     return () => window.clearInterval(interval);
   }, [deckATrack, deckBTrack, deckPlaying, setDeckPosition, syncEnabled, syncMaster]);
@@ -881,9 +943,9 @@ export function App() {
   }, [reportAudioError]);
 
   const sendControllerFxState = useCallback((state: ControllerFxState, target = state.target) => {
-    const effects = state.slots.filter((slot) => slot.enabled).map((slot) => ({ ...slot }));
-    const deckAEffects = target === "A" || target === "both" ? effects : [];
-    const deckBEffects = target === "B" || target === "both" ? effects : [];
+    const activeSlots = state.slots.filter((slot) => slot.enabled);
+    const deckAEffects = target === "A" || target === "both" ? activeSlots.map((slot) => audioFxConfigForSlot(slot, deckTracksRef.current.A.bpm)) : [];
+    const deckBEffects = target === "B" || target === "both" ? activeSlots.map((slot) => audioFxConfigForSlot(slot, deckTracksRef.current.B.bpm)) : [];
     setAudioDeckFxChain("A", deckAEffects).catch(reportAudioError);
     setAudioDeckFxChain("B", deckBEffects).catch(reportAudioError);
   }, [reportAudioError]);
@@ -898,7 +960,7 @@ export function App() {
     controllerFxRef.current = state;
     setControllerFxDebug(cloneControllerFxState(state));
     const focusedSlot = state.slots[state.focusIndex];
-    setControllerStatus(`FX ${state.focusIndex + 1}: ${fxKindLabel(focusedSlot.kind)} ${focusedSlot.enabled ? "on" : "off"} · ${fxTargetLabel(state.target)} · ${Math.round(focusedSlot.mix * 100)}%`);
+    setControllerStatus(`FX ${state.focusIndex + 1}: ${fxKindLabel(focusedSlot.kind)} ${focusedSlot.enabled ? "on" : "off"} · ${fxTargetLabel(state.target)} · ${fxTimingLabel(focusedSlot, controllerFxBpm(state, deckTracksRef.current))} · ${Math.round(focusedSlot.mix * 100)}%`);
     sendControllerFxFeedback(state);
     if (send) sendControllerFxState(state);
   }, [sendControllerFxState]);
@@ -979,6 +1041,12 @@ export function App() {
       case "browsePress":
         if (action.pressed) handleLibraryBrowsePress(action.shifted);
         break;
+      case "beatSync":
+        if (action.pressed) beatSyncDeck(deck);
+        break;
+      case "tempoRange":
+        if (action.pressed) cycleDeckTempoRange(deck);
+        break;
       case "tempo": {
         const range = deckTempoRangesRef.current[deck];
         setDeckTempo(deck, Number((action.value * range).toFixed(1)));
@@ -1012,11 +1080,11 @@ export function App() {
           });
         }
         break;
-      case "fxFocus":
+      case "fxBeat":
         if (action.pressed) {
           updateControllerFxState((state) => {
-            state.focusIndex += action.direction;
-          }, false);
+            state.slots[state.focusIndex] = adjustFxBeat(state.slots[state.focusIndex], action.direction);
+          });
         }
         break;
       case "fxTarget":
@@ -1062,7 +1130,7 @@ export function App() {
       case "raw":
         break;
     }
-  }, [endDeckScrub, handleDeckCueAction, handleLibraryBrowse, handleLibraryBrowsePress, loadDeckByTrackId, moveDeckByJogTicks, setDeckEq, setDeckFilter, setDeckPlayback, setDeckTempo, setDeckVolume, setMixerCrossfader, startDeckScrub, updateControllerFxState]);
+  }, [beatSyncDeck, cycleDeckTempoRange, endDeckScrub, handleDeckCueAction, handleLibraryBrowse, handleLibraryBrowsePress, loadDeckByTrackId, moveDeckByJogTicks, setDeckEq, setDeckFilter, setDeckPlayback, setDeckTempo, setDeckVolume, setMixerCrossfader, startDeckScrub, updateControllerFxState]);
 
   const { clearMidiDebugEvents, controllerStatus, midiDebugEvents, setControllerStatus } = useControllerPolling(handleControllerAction);
 
