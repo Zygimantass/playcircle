@@ -2,11 +2,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use playcircle_audio::{decoder::decode_file, AudioEngine, DeckId};
+use playcircle_controller::{ControllerDevice, ControllerEvent, ControllerManager};
 use playcircle_rekordbox::{
     RekordboxBeat, RekordboxDatabase, RekordboxLibrary, RekordboxPlaylist, RekordboxTrack,
 };
 
 struct AudioEngineState(Mutex<Option<AudioEngine>>);
+struct ControllerState(Mutex<ControllerManager>);
 
 #[tauri::command]
 fn load_rekordbox_tracks(path: Option<String>) -> Result<Vec<RekordboxTrack>, String> {
@@ -45,7 +47,12 @@ fn create_rekordbox_playlist(
         .map_err(|error| format!("failed to open {} for writing: {error}", db_path.display()))?;
 
     db.create_playlist(parent_id.as_deref(), &name)
-        .map_err(|error| format!("failed to create playlist in {}: {error}", db_path.display()))
+        .map_err(|error| {
+            format!(
+                "failed to create playlist in {}: {error}",
+                db_path.display()
+            )
+        })
 }
 
 #[tauri::command]
@@ -61,7 +68,28 @@ fn add_rekordbox_tracks_to_playlist(
         .map_err(|error| format!("failed to open {} for writing: {error}", db_path.display()))?;
 
     db.add_tracks_to_playlist(&playlist_id, &track_ids)
-        .map_err(|error| format!("failed to add tracks to playlist in {}: {error}", db_path.display()))
+        .map_err(|error| {
+            format!(
+                "failed to add tracks to playlist in {}: {error}",
+                db_path.display()
+            )
+        })
+}
+
+#[tauri::command]
+fn move_rekordbox_playlist_to_folder(
+    path: Option<String>,
+    playlist_id: String,
+    folder_id: String,
+) -> Result<RekordboxPlaylist, String> {
+    let db_path = path
+        .map(PathBuf::from)
+        .unwrap_or_else(default_demo_database_path);
+    let mut db = RekordboxDatabase::open_read_write(&db_path)
+        .map_err(|error| format!("failed to open {} for writing: {error}", db_path.display()))?;
+
+    db.move_playlist_to_folder(&playlist_id, &folder_id)
+        .map_err(|error| format!("failed to move playlist in {}: {error}", db_path.display()))
 }
 
 #[tauri::command]
@@ -295,6 +323,50 @@ fn audio_deck_level_db(
     })
 }
 
+#[tauri::command]
+fn list_controllers(
+    state: tauri::State<'_, ControllerState>,
+) -> Result<Vec<ControllerDevice>, String> {
+    let manager = state
+        .0
+        .lock()
+        .map_err(|_| "controller state lock poisoned".to_string())?;
+    manager.list_devices()
+}
+
+#[tauri::command]
+fn connect_controller(
+    state: tauri::State<'_, ControllerState>,
+    id: String,
+) -> Result<ControllerDevice, String> {
+    let mut manager = state
+        .0
+        .lock()
+        .map_err(|_| "controller state lock poisoned".to_string())?;
+    manager.connect(&id)
+}
+
+#[tauri::command]
+fn disconnect_controller(state: tauri::State<'_, ControllerState>) -> Result<(), String> {
+    let mut manager = state
+        .0
+        .lock()
+        .map_err(|_| "controller state lock poisoned".to_string())?;
+    manager.disconnect();
+    Ok(())
+}
+
+#[tauri::command]
+fn poll_controller_events(
+    state: tauri::State<'_, ControllerState>,
+) -> Result<Vec<ControllerEvent>, String> {
+    let mut manager = state
+        .0
+        .lock()
+        .map_err(|_| "controller state lock poisoned".to_string())?;
+    Ok(manager.poll_events())
+}
+
 fn with_audio_engine<T>(
     state: &tauri::State<'_, AudioEngineState>,
     action: impl FnOnce(&AudioEngine) -> Result<T, String>,
@@ -313,12 +385,14 @@ fn with_audio_engine<T>(
 pub fn run() {
     tauri::Builder::default()
         .manage(AudioEngineState(Mutex::new(None)))
+        .manage(ControllerState(Mutex::new(ControllerManager::new())))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             load_rekordbox_tracks,
             load_rekordbox_library,
             create_rekordbox_playlist,
             add_rekordbox_tracks_to_playlist,
+            move_rekordbox_playlist_to_folder,
             load_rekordbox_beat_grid,
             load_audio_waveform,
             load_audio_deck,
@@ -337,7 +411,11 @@ pub fn run() {
             set_audio_master_volume,
             audio_deck_position,
             audio_deck_error,
-            audio_deck_level_db
+            audio_deck_level_db,
+            list_controllers,
+            connect_controller,
+            disconnect_controller,
+            poll_controller_events
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playcircle");

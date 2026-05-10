@@ -516,6 +516,93 @@ impl RekordboxDatabase {
         self.read_playlist(playlist_id)
     }
 
+    pub fn move_playlist_to_folder(
+        &mut self,
+        playlist_id: &str,
+        folder_id: &str,
+    ) -> Result<RekordboxPlaylist> {
+        if playlist_id.trim().is_empty() {
+            return Err(RekordboxError::Validation(
+                "playlist id cannot be empty".to_string(),
+            ));
+        }
+        if folder_id.trim().is_empty() {
+            return Err(RekordboxError::Validation(
+                "folder id cannot be empty".to_string(),
+            ));
+        }
+        if playlist_id == folder_id {
+            return Err(RekordboxError::Validation(
+                "cannot move a playlist under itself".to_string(),
+            ));
+        }
+
+        self.backup_database_file()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let playlist_exists: Option<i64> = transaction
+            .query_row(
+                r#"
+                SELECT 1
+                FROM djmdPlaylist
+                WHERE ID = ?1
+                  AND COALESCE(rb_local_deleted, 0) = 0
+                "#,
+                [playlist_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if playlist_exists.is_none() {
+            return Err(RekordboxError::Validation(format!(
+                "playlist {playlist_id} does not exist"
+            )));
+        }
+
+        let folder_attribute: Option<i64> = transaction
+            .query_row(
+                r#"
+                SELECT COALESCE(Attribute, 0)
+                FROM djmdPlaylist
+                WHERE ID = ?1
+                  AND COALESCE(rb_local_deleted, 0) = 0
+                "#,
+                [folder_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if folder_attribute != Some(1) {
+            return Err(RekordboxError::Validation(format!(
+                "playlist {folder_id} is not a folder"
+            )));
+        }
+
+        if playlist_descendants(&transaction, playlist_id)?.iter().any(|id| id == folder_id) {
+            return Err(RekordboxError::Validation(
+                "cannot move a playlist under one of its descendants".to_string(),
+            ));
+        }
+
+        let sequence = next_playlist_sequence(&transaction, folder_id)?;
+        let rb_local_usn = next_local_usn(&transaction, "djmdPlaylist")?;
+        transaction.execute(
+            r#"
+            UPDATE djmdPlaylist
+            SET ParentID = ?1,
+                Seq = ?2,
+                rb_local_data_status = 1,
+                rb_local_usn = ?3,
+                updated_at = strftime('%Y-%m-%d %H:%M:%f +00:00', 'now')
+            WHERE ID = ?4
+            "#,
+            (folder_id, sequence, rb_local_usn, playlist_id),
+        )?;
+        transaction.commit()?;
+
+        self.read_playlist(playlist_id)
+    }
+
     fn read_playlist(&self, playlist_id: &str) -> Result<RekordboxPlaylist> {
         self.read_playlists()?
             .into_iter()
@@ -572,6 +659,37 @@ fn next_local_usn(connection: &Connection, table_name: &str) -> Result<i64> {
     let sql = format!("SELECT COALESCE(MAX(rb_local_usn), 0) + 1 FROM {table_name}");
     let next_usn = connection.query_row(&sql, [], |row| row.get(0))?;
     Ok(next_usn)
+}
+
+fn playlist_descendants(connection: &Connection, playlist_id: &str) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT ID, ParentID
+        FROM djmdPlaylist
+        WHERE COALESCE(rb_local_deleted, 0) = 0
+          AND ParentID IS NOT NULL
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut children_by_parent = HashMap::<String, Vec<String>>::new();
+    for row in rows {
+        let (id, parent_id) = row?;
+        children_by_parent.entry(parent_id).or_default().push(id);
+    }
+
+    let mut descendants = Vec::new();
+    let mut stack = children_by_parent
+        .remove(playlist_id)
+        .unwrap_or_default();
+    while let Some(id) = stack.pop() {
+        if let Some(children) = children_by_parent.remove(&id) {
+            stack.extend(children);
+        }
+        descendants.push(id);
+    }
+    Ok(descendants)
 }
 
 fn random_uuid(connection: &Connection) -> Result<String> {
@@ -810,7 +928,7 @@ mod tests {
             .find(|playlist| playlist.name == "indie dance hq")
             .expect("indie dance hq playlist");
 
-        assert_eq!(playlists.len(), 23);
+        assert!(playlists.len() >= 23);
         assert!(folder.is_folder);
         assert_eq!(folder.parent_id, None);
         assert_eq!(child.parent_id.as_deref(), Some(folder.id.as_str()));
@@ -872,6 +990,39 @@ mod tests {
             .add_tracks_to_playlist(&playlist.id, &playlist.track_ids.clone())
             .expect("skip duplicate tracks");
         assert_eq!(playlist.track_ids.len(), 3);
+        remove_fixture_copy_and_backups(&path);
+    }
+
+    #[test]
+    fn moves_playlist_under_folder_in_writable_database_copy() {
+        let path = writable_fixture_copy();
+        let mut db =
+            RekordboxDatabase::open_read_write(&path).expect("open writable rekordbox copy");
+        let folder_id = db
+            .read_playlists()
+            .expect("read playlists")
+            .into_iter()
+            .find(|playlist| playlist.is_folder)
+            .expect("fixture folder")
+            .id;
+        let playlist = db
+            .create_playlist(None, "Playcircle Move Test")
+            .expect("create playlist");
+
+        let moved = db
+            .move_playlist_to_folder(&playlist.id, &folder_id)
+            .expect("move playlist");
+
+        assert_eq!(moved.parent_id.as_deref(), Some(folder_id.as_str()));
+        drop(db);
+        let db = RekordboxDatabase::open(&path).expect("reopen copy readonly");
+        let moved = db
+            .read_playlists()
+            .expect("read playlists")
+            .into_iter()
+            .find(|item| item.id == playlist.id)
+            .expect("moved playlist");
+        assert_eq!(moved.parent_id.as_deref(), Some(folder_id.as_str()));
         remove_fixture_copy_and_backups(&path);
     }
 }

@@ -2,6 +2,7 @@
 members = [
     "src/app",
     "src/audio",
+    "src/controller",
     "src/rekordbox",
 ]
 resolver = "2"
@@ -14,7 +15,9 @@ authors = ["Playcircle"]
 [workspace.dependencies]
 playcircle-rekordbox = { path = "src/rekordbox" }
 playcircle-audio = { path = "src/audio" }
+playcircle-controller = { path = "src/controller" }
 cpal = "0.16"
+midir = "0.10"
 rusqlite = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

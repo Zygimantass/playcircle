@@ -1,0 +1,10 @@
+[package]
+name = "playcircle-controller"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Playcircle MIDI controller discovery and mapping"
+
+[dependencies]
+midir.workspace = true
+serde.workspace = true

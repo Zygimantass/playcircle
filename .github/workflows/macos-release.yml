@@ -1,0 +1,73 @@
+name: macOS Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build macOS app
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri bundle
+        run: npm run tauri:build
+
+      - name: Package app bundles
+        run: |
+          find target/release/bundle -name "*.app" -type d -print0 |
+            while IFS= read -r -d '' app; do
+              ditto -c -k --sequesterRsrc --keepParent "$app" "$app.zip"
+            done
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: playcircle-macos-${{ github.sha }}
+          path: |
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.app.zip
+            target/release/playcircle-app
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: macos-${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          name: macOS build ${{ github.sha }}
+          body: Automated macOS build for `${{ github.sha }}` on `main`.
+          prerelease: true
+          files: |
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.app.zip
+            target/release/playcircle-app

@@ -1,5 +1,6 @@
-import { useDroppable } from "@dnd-kit/core";
-import { memo, useState } from "react";
+import { useDraggable, useDroppable } from "@dnd-kit/core";
+import { memo, useMemo, useState } from "react";
+import { isRecentlyAdded, recentAddedCutoff } from "../data/recentTracks";
 import type { CurrentNode, PcData, PlaylistEntry } from "../designTypes";
 import { classNames, ui } from "./common";
 
@@ -8,7 +9,9 @@ type SidebarProps = {
   currentNode: CurrentNode;
   setCurrentNode: (node: CurrentNode) => void;
   onDropToCrate: (crateId: string, trackId: string) => void;
-  onCreatePlaylist: () => void;
+  onCreatePlaylist: (name: string) => void;
+  onMovePlaylistToFolder: (playlistId: string, folderId: string) => void;
+  playlistDragActive: boolean;
   dragHoverCrate: string | null;
   setDragHoverCrate: (crateId: string | null) => void;
 };
@@ -73,16 +76,28 @@ function PlaylistTreeItem({
   playlist,
   currentNode,
   setCurrentNode,
+  onMovePlaylistToFolder,
+  playlistDragActive,
   depth = 0
 }: {
   playlist: PlaylistEntry;
   currentNode: CurrentNode;
   setCurrentNode: (node: CurrentNode) => void;
+  onMovePlaylistToFolder: (playlistId: string, folderId: string) => void;
+  playlistDragActive: boolean;
   depth?: number;
 }) {
   const [open, setOpen] = useState(true);
-  const { isOver, setNodeRef } = useDroppable({
+  const { isOver: isTrackOver, setNodeRef: setTrackDropRef } = useDroppable({
     id: `playlist:${playlist.id}`,
+    disabled: playlistDragActive || playlist.isFolder
+  });
+  const { isOver: isPlaylistOver, setNodeRef: setFolderDropRef } = useDroppable({
+    id: `playlist-folder:${playlist.id}`,
+    disabled: !playlistDragActive || !playlist.isFolder
+  });
+  const { attributes, isDragging, listeners, setNodeRef: setDragRef, transform } = useDraggable({
+    id: `playlist-drag:${playlist.id}`,
     disabled: playlist.isFolder
   });
   const hasChildren = playlist.children.length > 0;
@@ -90,14 +105,29 @@ function PlaylistTreeItem({
   return (
     <div>
       <button
-        ref={setNodeRef}
+        ref={(node) => {
+          setTrackDropRef(node);
+          setFolderDropRef(node);
+          setDragRef(node);
+        }}
         className={classNames(
           ui.sideItem,
           "w-full",
           currentNode.type === "playlist" && currentNode.id === playlist.id && ui.activeSideItem,
-          isOver && !playlist.isFolder && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim"
+          isTrackOver && !playlist.isFolder && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim",
+          isPlaylistOver && playlist.isFolder && "border-l-accent bg-accent/15 outline outline-1 -outline-offset-1 outline-accent-dim"
         )}
-        style={{ paddingLeft: `${18 + depth * 12}px` }}
+        data-playlist-id={playlist.id}
+        data-playlist-folder={playlist.isFolder ? "true" : "false"}
+        data-testid="playlist-row"
+        style={{
+          paddingLeft: `${18 + depth * 12}px`,
+          opacity: isDragging ? 0.7 : undefined,
+          transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
+          zIndex: isDragging ? 30 : undefined
+        }}
+        {...attributes}
+        {...listeners}
         onClick={() => setCurrentNode({ type: "playlist", id: playlist.id })}
       >
         <span
@@ -108,7 +138,7 @@ function PlaylistTreeItem({
             setOpen((value) => !value);
           }}
         >
-          {hasChildren ? (open ? "▾" : "▸") : playlist.isFolder ? "·" : "≡"}
+          {playlist.isFolder ? <FolderGlyph /> : "≡"}
         </span>
         <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">{playlist.name}</span>
         <span className="font-mono text-[10px] text-text-3">{playlist.count}</span>
@@ -121,6 +151,8 @@ function PlaylistTreeItem({
               playlist={child}
               currentNode={currentNode}
               setCurrentNode={setCurrentNode}
+              onMovePlaylistToFolder={onMovePlaylistToFolder}
+              playlistDragActive={playlistDragActive}
               depth={depth + 1}
             />
           ))}
@@ -130,9 +162,19 @@ function PlaylistTreeItem({
   );
 }
 
-export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode, onDropToCrate, onCreatePlaylist, dragHoverCrate, setDragHoverCrate }: SidebarProps) {
-  const recentCount = data.TRACKS.filter((track) => track.added.startsWith("2025")).length;
-  const fiveStarCount = data.TRACKS.filter((track) => track.rating === 5).length;
+export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode, onDropToCrate, onCreatePlaylist, onMovePlaylistToFolder, playlistDragActive, dragHoverCrate, setDragHoverCrate }: SidebarProps) {
+  const [creatingPlaylist, setCreatingPlaylist] = useState(false);
+  const [playlistName, setPlaylistName] = useState("");
+  const { recentCount, fiveStarCount } = useMemo(() => {
+    let recentCount = 0;
+    let fiveStarCount = 0;
+    const recentCutoff = recentAddedCutoff(data.TRACKS);
+    for (const track of data.TRACKS) {
+      if (isRecentlyAdded(track, recentCutoff)) recentCount += 1;
+      if (track.rating === 5) fiveStarCount += 1;
+    }
+    return { recentCount, fiveStarCount };
+  }, [data.TRACKS]);
 
   return (
     <aside className="overflow-y-auto bg-surface-1 py-1.5 pb-3 [scrollbar-color:var(--color-line-2)_transparent] [scrollbar-width:thin]">
@@ -164,20 +206,54 @@ export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode
       </SidebarSection>
 
       <SidebarSection title="PLAYLISTS" count={data.PLAYLISTS.length}>
-        <button
-          className={classNames(ui.sideItem, "mb-1 w-full text-text-2 hover:text-text-1")}
-          type="button"
-          onClick={onCreatePlaylist}
-        >
-          <span className="w-3 text-center text-[12px] text-accent">+</span>
-          <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">New playlist</span>
-        </button>
+        {creatingPlaylist ? (
+          <form
+            className="mb-1 flex h-7 items-center gap-1 px-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const name = playlistName.trim();
+              if (!name) return;
+              onCreatePlaylist(name);
+              setPlaylistName("");
+              setCreatingPlaylist(false);
+            }}
+          >
+            <input
+              autoFocus
+              aria-label="Playlist name"
+              className="min-w-0 flex-1 rounded-[3px] border border-line-2 bg-surface-2 px-1.5 py-1 text-[12px] text-text-1 outline-none focus:border-accent"
+              value={playlistName}
+              onChange={(event) => setPlaylistName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setPlaylistName("");
+                  setCreatingPlaylist(false);
+                }
+              }}
+            />
+            <button className="rounded-[3px] border border-line-2 px-1.5 py-1 text-[11px] text-text-2 hover:text-text-1" type="submit">
+              Add
+            </button>
+          </form>
+        ) : (
+          <button
+            className={classNames(ui.sideItem, "mb-1 w-full pl-[18px] text-text-2 hover:text-text-1")}
+            data-testid="new-playlist-button"
+            type="button"
+            onClick={() => setCreatingPlaylist(true)}
+          >
+            <span className="grid size-3 shrink-0 place-items-center text-[11px] leading-none text-accent">+</span>
+            <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-left">New playlist</span>
+          </button>
+        )}
         {data.PLAYLISTS.map((playlist) => (
           <PlaylistTreeItem
             key={playlist.id}
             playlist={playlist}
             currentNode={currentNode}
             setCurrentNode={setCurrentNode}
+            onMovePlaylistToFolder={onMovePlaylistToFolder}
+            playlistDragActive={playlistDragActive}
           />
         ))}
       </SidebarSection>
@@ -196,3 +272,17 @@ export const Sidebar = memo(function Sidebar({ data, currentNode, setCurrentNode
     </aside>
   );
 });
+
+function FolderGlyph() {
+  return (
+    <svg className="size-3 shrink-0 text-text-3" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M1.8 4.2c0-.8.5-1.2 1.3-1.2h3l1.3 1.4h5.5c.8 0 1.3.5 1.3 1.2v6.2c0 .8-.5 1.2-1.3 1.2H3.1c-.8 0-1.3-.5-1.3-1.2V4.2Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}

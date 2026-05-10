@@ -7,8 +7,10 @@ import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { TrackTable } from "./components/TrackTable";
 import { audioDeckError, audioDeckLevelDb, audioDeckPosition, endAudioDeckScrub, loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, scrubAudioDeckToPosition, seekAudioDeck, setAudioDeckEq, setAudioDeckFilterAmount, setAudioDeckTempo, setAudioDeckVolume, setAudioMasterVolume, startAudioDeckScrub, usesBrowserAudioFixture, type DeckId } from "./api/audio";
-import { addRekordboxTracksToPlaylist, createRekordboxPlaylist, loadRekordboxBeatGrid, loadRekordboxLibrary } from "./api/rekordbox";
+import { connectController, disconnectController, listControllers, pollControllerEvents, type ControllerAction } from "./api/controller";
+import { addRekordboxTracksToPlaylist, createRekordboxPlaylist, loadRekordboxBeatGrid, loadRekordboxLibrary, moveRekordboxPlaylistToFolder } from "./api/rekordbox";
 import { withRekordboxLibrary } from "./data/libraryMapping";
+import { isRecentlyAdded, recentAddedCutoff } from "./data/recentTracks";
 import type { CurrentNode, PcData, PlaylistEntry, SortableTrackKey, SortState, Track } from "./designTypes";
 
 declare global {
@@ -51,14 +53,20 @@ export function App() {
   const [deckCuePoints, setDeckCuePoints] = useState({ A: 0, B: 0 });
   const tempoSendTimeouts = useRef<Record<DeckId, number | null>>({ A: null, B: null });
   const deckPositionsRef = useRef(deckPositions);
+  const deckPlayingRef = useRef(deckPlaying);
+  const deckTempoRangesRef = useRef(deckTempoRanges);
+  const selectedRef = useRef(selected);
   const [loadedDeckPaths, setLoadedDeckPaths] = useState<{ A: string | null; B: string | null }>({ A: null, B: null });
   const [crossfader, setCrossfader] = useState(0);
   const [masterVolume, setMasterVolume] = useState(0.9);
   const [audioStatus, setAudioStatus] = useState("Rust audio engine ready");
+  const [controllerStatus, setControllerStatus] = useState("Controller idle");
+  const handleControllerActionRef = useRef<(action: ControllerAction) => void>(() => undefined);
   const [baseTrack, setBaseTrack] = useState<Track | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [activeDragTrackId, setActiveDragTrackId] = useState<string | null>(null);
+  const [activeDragPlaylistId, setActiveDragPlaylistId] = useState<string | null>(null);
   const [dragHoverCrate, setDragHoverCrate] = useState<string | null>(null);
   const [flashCrate, setFlashCrate] = useState<string | null>(null);
   const [crateMembership, setCrateMembership] = useState<Record<string, Set<string>>>(() => {
@@ -86,6 +94,18 @@ export function App() {
   useEffect(() => {
     deckPositionsRef.current = deckPositions;
   }, [deckPositions]);
+
+  useEffect(() => {
+    deckPlayingRef.current = deckPlaying;
+  }, [deckPlaying]);
+
+  useEffect(() => {
+    deckTempoRangesRef.current = deckTempoRanges;
+  }, [deckTempoRanges]);
+
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
 
   useEffect(() => {
     let cancelled = false;
@@ -306,12 +326,27 @@ export function App() {
     window.setTimeout(() => setFlashCrate(null), 700);
   }, [multiSelected]);
 
-  const createPlaylist = useCallback(() => {
-    const name = window.prompt("Playlist name");
-    if (name === null || name.trim() === "") return;
-
+  const createPlaylist = useCallback((name: string) => {
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
     setLibraryWriteStatus("Creating playlist...");
-    createRekordboxPlaylist(name)
+
+    if (new URLSearchParams(window.location.search).get("fixture") === "rekordbox") {
+      const playlist: PlaylistEntry = {
+        id: `fixture_playlist_${Date.now()}`,
+        name: trimmedName,
+        count: 0,
+        trackIds: [],
+        isFolder: false,
+        children: []
+      };
+      setData((current) => ({ ...current, PLAYLISTS: [playlist, ...current.PLAYLISTS] }));
+      setCurrentNode({ type: "playlist", id: playlist.id });
+      setLibraryWriteStatus(`Created ${playlist.name}`);
+      return;
+    }
+
+    createRekordboxPlaylist(trimmedName)
       .then((playlist) => reloadRekordboxLibrary().then(() => playlist))
       .then((playlist) => {
         setCurrentNode({ type: "playlist", id: playlist.id });
@@ -330,10 +365,32 @@ export function App() {
       : [activeTrackId];
 
     setLibraryWriteStatus(`Adding ${trackIds.length} track${trackIds.length === 1 ? "" : "s"}...`);
+
+    if (new URLSearchParams(window.location.search).get("fixture") === "rekordbox") {
+      let playlistName = "playlist";
+      setData((current) => ({
+        ...current,
+        PLAYLISTS: updatePlaylistEntries(current.PLAYLISTS, playlistId, (playlist) => {
+          playlistName = playlist.name;
+          const existing = new Set(playlist.trackIds);
+          const nextTrackIds = [
+            ...playlist.trackIds,
+            ...trackIds.filter((trackId) => !existing.has(trackId))
+          ];
+          return {
+            ...playlist,
+            trackIds: nextTrackIds,
+            count: nextTrackIds.length
+          };
+        })
+      }));
+      setLibraryWriteStatus(`Added to ${playlistName}`);
+      return;
+    }
+
     addRekordboxTracksToPlaylist(playlistId, trackIds)
       .then((playlist) => reloadRekordboxLibrary().then(() => playlist))
       .then((playlist) => {
-        setCurrentNode({ type: "playlist", id: playlist.id });
         setLibraryWriteStatus(`Added to ${playlist.name}`);
       })
       .catch((error) => {
@@ -342,6 +399,39 @@ export function App() {
         setLibraryStatus("error");
       });
   }, [multiSelected, reloadRekordboxLibrary]);
+
+  const movePlaylistToFolder = useCallback((playlistId: string, folderId: string) => {
+    if (playlistId === folderId) return;
+    const playlist = findPlaylist(data.PLAYLISTS, playlistId);
+    const folder = findPlaylist(data.PLAYLISTS, folderId);
+    if (!playlist || !folder?.isFolder || playlistContains(playlist, folderId)) return;
+
+    setLibraryWriteStatus(`Moving ${playlist.name}...`);
+
+    if (new URLSearchParams(window.location.search).get("fixture") === "rekordbox") {
+      const moved = movePlaylistEntry(data.PLAYLISTS, playlistId, folderId);
+      if (!moved) {
+        setLibraryWriteStatus(null);
+        return;
+      }
+      setData((current) => ({ ...current, PLAYLISTS: recalculatePlaylistCounts(moved) }));
+      setCurrentNode({ type: "playlist", id: playlistId });
+      setLibraryWriteStatus(`Moved ${playlist.name} to ${folder.name}`);
+      return;
+    }
+
+    moveRekordboxPlaylistToFolder(playlistId, folderId)
+      .then((playlist) => reloadRekordboxLibrary().then(() => playlist))
+      .then((playlist) => {
+        setCurrentNode({ type: "playlist", id: playlist.id });
+        setLibraryWriteStatus(`Moved ${playlist.name}`);
+      })
+      .catch((error) => {
+        setLibraryWriteStatus(null);
+        setLibraryError(error instanceof Error ? error.message : String(error));
+        setLibraryStatus("error");
+      });
+  }, [data.PLAYLISTS, reloadRekordboxLibrary]);
 
   const ensureDeckLoaded = useCallback(async (deck: DeckId, track: Track) => {
     if (!track.filePath) {
@@ -442,12 +532,23 @@ export function App() {
   const handleDndDragStart = useCallback((event: DragStartEvent) => {
     const activeId = String(event.active.id);
     setActiveDragTrackId(activeId.startsWith("track:") ? activeId.slice("track:".length) : null);
+    setActiveDragPlaylistId(activeId.startsWith("playlist-drag:") ? activeId.slice("playlist-drag:".length) : null);
   }, []);
 
   const handleDndDragEnd = useCallback((event: DragEndEvent) => {
     const activeId = String(event.active.id);
     const overId = event.over ? String(event.over.id) : "";
     setActiveDragTrackId(null);
+    setActiveDragPlaylistId(null);
+    if (activeId.startsWith("playlist-drag:")) {
+      if (overId.startsWith("playlist-folder:")) {
+        movePlaylistToFolder(
+          activeId.slice("playlist-drag:".length),
+          overId.slice("playlist-folder:".length)
+        );
+      }
+      return;
+    }
     if (!activeId.startsWith("track:")) return;
     const trackId = activeId.slice("track:".length);
 
@@ -460,7 +561,7 @@ export function App() {
     if (!deck) return;
 
     loadDeckByTrackId(deck, trackId);
-  }, [addTracksToPlaylist, loadDeckByTrackId]);
+  }, [addTracksToPlaylist, loadDeckByTrackId, movePlaylistToFolder]);
 
   const setDeckPlayback = useCallback((deck: DeckId, playing: boolean) => {
     const track = deck === "A" ? deckATrack : deckBTrack;
@@ -665,6 +766,87 @@ export function App() {
     }
   }, [ensureDeckLoaded, loadAnalysisForTrack, reportAudioError]);
 
+  const handleControllerAction = useCallback((action: ControllerAction) => {
+    const deck = deckIdFromControllerAction(action);
+
+    switch (action.type) {
+      case "playPause":
+        if (action.pressed) setDeckPlayback(deck, !deckPlayingRef.current[deck]);
+        break;
+      case "cue":
+        if (action.pressed) handleDeckCueAction(deck);
+        break;
+      case "loadSelected":
+        loadDeckByTrackId(deck, selectedRef.current);
+        break;
+      case "tempo": {
+        const range = deckTempoRangesRef.current[deck];
+        setDeckTempo(deck, Number((action.value * range).toFixed(1)));
+        break;
+      }
+      case "volume":
+        setDeckVolume(deck, action.value);
+        break;
+      case "eq":
+        setDeckEq(deck, action.band, action.value);
+        break;
+      case "filter":
+        setDeckFilter(deck, action.value);
+        break;
+      case "crossfader":
+        setMixerCrossfader(action.value * 2 - 1);
+        break;
+      case "hotCue":
+      case "jog":
+      case "raw":
+        break;
+    }
+  }, [handleDeckCueAction, loadDeckByTrackId, setDeckEq, setDeckFilter, setDeckPlayback, setDeckTempo, setDeckVolume, setMixerCrossfader]);
+
+  useEffect(() => {
+    handleControllerActionRef.current = handleControllerAction;
+  }, [handleControllerAction]);
+
+  useEffect(() => {
+    if (usesBrowserAudioFixture()) return undefined;
+
+    let cancelled = false;
+    let pollInterval: number | null = null;
+
+    listControllers()
+      .then((devices) => {
+        if (cancelled) return;
+        const target = devices.find((device) => device.kind === "pioneerDdjFlx4") ?? devices[0];
+        if (!target) {
+          setControllerStatus("No controller");
+          return null;
+        }
+
+        setControllerStatus(`Connecting ${target.name}...`);
+        return connectController(target.id);
+      })
+      .then((device) => {
+        if (cancelled || !device) return;
+        setControllerStatus(`Connected ${device.name}`);
+        pollInterval = window.setInterval(() => {
+          pollControllerEvents()
+            .then((events) => {
+              events.forEach((event) => handleControllerActionRef.current(event.action));
+            })
+            .catch((error) => setControllerStatus(error instanceof Error ? error.message : String(error)));
+        }, 16);
+      })
+      .catch((error) => {
+        if (!cancelled) setControllerStatus(error instanceof Error ? error.message : String(error));
+      });
+
+    return () => {
+      cancelled = true;
+      if (pollInterval !== null) window.clearInterval(pollInterval);
+      disconnectController().catch(() => undefined);
+    };
+  }, []);
+
   useEffect(() => {
     if (libraryStatus !== "rekordbox") return undefined;
 
@@ -695,7 +877,10 @@ export function App() {
     <DndContext
       collisionDetection={pointerWithin}
       sensors={dndSensors}
-      onDragCancel={() => setActiveDragTrackId(null)}
+      onDragCancel={() => {
+        setActiveDragTrackId(null);
+        setActiveDragPlaylistId(null);
+      }}
       onDragEnd={handleDndDragEnd}
       onDragStart={handleDndDragStart}
     >
@@ -703,7 +888,7 @@ export function App() {
       <TopBar
         mode={mode}
         onSearchClick={openPalette}
-        query={paletteQuery || statusText(libraryStatus, data.TRACKS.length, libraryError)}
+        query={paletteQuery || `${statusText(libraryStatus, data.TRACKS.length, libraryError)} · ${controllerStatus}`}
         setMode={setMode}
       />
       {mode === "library" ? (
@@ -714,6 +899,8 @@ export function App() {
             setCurrentNode={setCurrentNode}
             onDropToCrate={onDropToCrate}
             onCreatePlaylist={createPlaylist}
+            onMovePlaylistToFolder={movePlaylistToFolder}
+            playlistDragActive={activeDragPlaylistId !== null}
             dragHoverCrate={flashCrate || dragHoverCrate}
             setDragHoverCrate={setDragHoverCrate}
           />
@@ -765,6 +952,8 @@ export function App() {
               setCurrentNode={setCurrentNode}
               onDropToCrate={onDropToCrate}
               onCreatePlaylist={createPlaylist}
+              onMovePlaylistToFolder={movePlaylistToFolder}
+              playlistDragActive={activeDragPlaylistId !== null}
               dragHoverCrate={flashCrate || dragHoverCrate}
               setDragHoverCrate={setDragHoverCrate}
             />
@@ -876,6 +1065,10 @@ function TrackDragOverlay({ track }: { track: Track }) {
 
 function otherDeck(deck: DeckId): DeckId {
   return deck === "A" ? "B" : "A";
+}
+
+function deckIdFromControllerAction(action: ControllerAction): DeckId {
+  return "deck" in action && action.deck === "b" ? "B" : "A";
 }
 
 function deckFromDndDropId(id: string): DeckId | null {
@@ -1009,7 +1202,8 @@ function LibraryWorkspace({
   setSelected: (id: string) => void;
 }) {
   const [sort, setSort] = useState<SortState>({ col: "added", dir: "desc" });
-  const recentTracks = useMemo(() => data.TRACKS.filter((track) => track.added.startsWith("2025")), [data.TRACKS]);
+  const recentCutoff = useMemo(() => recentAddedCutoff(data.TRACKS), [data.TRACKS]);
+  const recentTracks = useMemo(() => data.TRACKS.filter((track) => isRecentlyAdded(track, recentCutoff)), [data.TRACKS, recentCutoff]);
   const fiveStarTracks = useMemo(() => data.TRACKS.filter((track) => track.rating === 5), [data.TRACKS]);
   const historyTracks = useMemo(() => data.TRACKS.filter((track) => track.plays > 0), [data.TRACKS]);
   const tracksById = useMemo(() => new Map(data.TRACKS.map((track) => [track.id, track])), [data.TRACKS]);
@@ -1140,6 +1334,66 @@ function indexPlaylists(playlists: PlaylistEntry[]) {
   };
   playlists.forEach(visit);
   return index;
+}
+
+function updatePlaylistEntries(
+  playlists: PlaylistEntry[],
+  playlistId: string,
+  update: (playlist: PlaylistEntry) => PlaylistEntry
+): PlaylistEntry[] {
+  return playlists.map((playlist) => {
+    if (playlist.id === playlistId) return update(playlist);
+    if (playlist.children.length === 0) return playlist;
+    return {
+      ...playlist,
+      children: updatePlaylistEntries(playlist.children, playlistId, update)
+    };
+  });
+}
+
+function playlistContains(playlist: PlaylistEntry, id: string): boolean {
+  return playlist.children.some((child) => child.id === id || playlistContains(child, id));
+}
+
+function movePlaylistEntry(playlists: PlaylistEntry[], playlistId: string, folderId: string): PlaylistEntry[] | null {
+  const remove = (items: PlaylistEntry[]): { items: PlaylistEntry[]; removed: PlaylistEntry | null } => {
+    let removed: PlaylistEntry | null = null;
+    const next = items.flatMap((item) => {
+      if (item.id === playlistId) {
+        removed = item;
+        return [];
+      }
+      if (item.children.length === 0) return [item];
+      const childResult = remove(item.children);
+      if (childResult.removed) removed = childResult.removed;
+      return [{ ...item, children: childResult.items }];
+    });
+    return { items: next, removed };
+  };
+
+  const insert = (items: PlaylistEntry[], playlist: PlaylistEntry): PlaylistEntry[] => {
+    return items.map((item) => {
+      if (item.id === folderId && item.isFolder) {
+        return { ...item, children: [...item.children, playlist] };
+      }
+      if (item.children.length === 0) return item;
+      return { ...item, children: insert(item.children, playlist) };
+    });
+  };
+
+  const { items, removed } = remove(playlists);
+  return removed ? insert(items, removed) : null;
+}
+
+function recalculatePlaylistCounts(playlists: PlaylistEntry[]): PlaylistEntry[] {
+  return playlists.map((playlist) => {
+    const children = recalculatePlaylistCounts(playlist.children);
+    return {
+      ...playlist,
+      children,
+      count: playlist.trackIds.length + children.reduce((total, child) => total + child.count, 0)
+    };
+  });
 }
 
 function mapTrackIds(ids: Iterable<string>, tracksById: Map<string, Track>) {

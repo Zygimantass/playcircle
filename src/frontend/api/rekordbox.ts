@@ -97,6 +97,18 @@ export function addRekordboxTracksToPlaylist(playlistId: string, trackIds: strin
   });
 }
 
+export function moveRekordboxPlaylistToFolder(playlistId: string, folderId: string, path?: string) {
+  if (shouldUseBrowserFixture()) {
+    return Promise.reject(new Error("Rekordbox fixture mode is read-only"));
+  }
+
+  return invoke<RekordboxPlaylistDto>("move_rekordbox_playlist_to_folder", {
+    path,
+    playlistId,
+    folderId
+  });
+}
+
 export function loadRekordboxBeatGrid(analysisDataPath: string, path?: string) {
   if (shouldUseBrowserFixture()) return Promise.resolve<RekordboxBeatDto[]>([]);
 

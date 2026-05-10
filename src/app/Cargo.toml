@@ -14,6 +14,7 @@ tauri-build.workspace = true
 
 [dependencies]
 playcircle-audio.workspace = true
+playcircle-controller.workspace = true
 playcircle-rekordbox.workspace = true
 serde.workspace = true
 serde_json.workspace = true
