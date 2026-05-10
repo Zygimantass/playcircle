@@ -1,0 +1,37 @@
+{
+  "name": "playcircle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "fixture:rekordbox": "cargo run -q -p playcircle-rekordbox --example export_tracks > public/rekordbox-demo-tracks.json",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 1420",
+    "tauri": "tauri --config src/app/tauri.conf.json",
+    "tauri:dev": "tauri dev --config src/app/tauri.conf.json",
+    "tauri:dev:hot": "tauri dev --config src/app/tauri.conf.json --config '{\"build\":{\"beforeDevCommand\":\"npm run dev\"}}'",
+    "tauri:build": "tauri build --config src/app/tauri.conf.json",
+    "perf:load": "npm run fixture:rekordbox && npm run build && cargo run -q -p playcircle-rekordbox --example load_perf && PLAYCIRCLE_PLAYWRIGHT_SERVER=preview playwright test tests/perf/initial-load.spec.ts --project=chromium",
+    "perf:library": "npm run fixture:rekordbox && npm run build && PLAYCIRCLE_PLAYWRIGHT_SERVER=preview playwright test tests/perf/library.spec.ts --project=chromium",
+    "perf:sort": "npm run fixture:rekordbox && npm run build && PLAYCIRCLE_PLAYWRIGHT_SERVER=preview playwright test tests/perf/sort.spec.ts --project=chromium",
+    "perf:audio": "npm run fixture:rekordbox && cargo run -q -p playcircle-audio --example load_playback_perf -- \"$(node scripts/first-existing-rekordbox-audio.mjs)\"",
+    "perf:decode": "npm run fixture:rekordbox && cargo run --release -q -p playcircle-audio --example decode_perf -- \"$(node scripts/first-existing-rekordbox-audio.mjs)\""
+  },
+  "dependencies": {
+    "@tauri-apps/api": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@tailwindcss/vite": "^4.3.0",
+    "@tauri-apps/cli": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "tailwindcss": "^4.3.0",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "playcircle-audio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Playcircle realtime audio engine"
+
+[dependencies]
+cpal.workspace = true
+symphonia.workspace = true

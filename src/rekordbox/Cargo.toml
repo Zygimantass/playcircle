@@ -1,0 +1,13 @@
+[package]
+name = "playcircle-rekordbox"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Rekordbox database parsing library"
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

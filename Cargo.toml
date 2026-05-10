@@ -1,0 +1,54 @@
+[workspace]
+members = [
+    "src/app",
+    "src/audio",
+    "src/rekordbox",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Playcircle"]
+
+[workspace.dependencies]
+playcircle-rekordbox = { path = "src/rekordbox" }
+playcircle-audio = { path = "src/audio" }
+cpal = "0.16"
+rusqlite = { version = "0.39", features = ["bundled-sqlcipher-vendored-openssl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia = { version = "0.5", features = ["aac", "aiff", "alac", "flac", "isomp4", "mp3", "pcm", "wav"] }
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+[profile.dev.package.playcircle-audio]
+opt-level = 3
+
+[profile.dev.package.symphonia]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+
+[profile.dev.package.symphonia-core]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-isomp4]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3

@@ -1,0 +1,21 @@
+[package]
+name = "playcircle-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Playcircle Tauri desktop shell"
+
+[lib]
+name = "playcircle_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+playcircle-audio.workspace = true
+playcircle-rekordbox.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-opener.workspace = true
