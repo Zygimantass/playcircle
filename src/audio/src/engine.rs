@@ -7,7 +7,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 
 use crate::deck::Deck;
-use crate::decoder::{decode_file, decode_file_to_sender, DecodeMessage};
+use crate::decoder::{decode_file, decode_file_to_sender, validate_file, DecodeMessage};
 
 #[derive(Debug, Clone, Copy)]
 pub enum DeckId {
@@ -112,6 +112,7 @@ impl AudioEngine {
     }
 
     pub fn load_deck(&self, deck: DeckId, path: impl AsRef<Path>) -> Result<(), String> {
+        validate_file(path.as_ref())?;
         self.send(AudioCommand::LoadPath {
             deck,
             path: path.as_ref().to_path_buf(),
@@ -136,12 +137,44 @@ impl AudioEngine {
         self.send(AudioCommand::Seek { deck, position })
     }
 
+    pub fn start_deck_scrub(&self, deck: DeckId) -> Result<(), String> {
+        self.send(AudioCommand::ScrubStart { deck })
+    }
+
+    pub fn scrub_deck_to_position(&self, deck: DeckId, position: f32) -> Result<(), String> {
+        self.send(AudioCommand::ScrubTo { deck, position })
+    }
+
+    pub fn end_deck_scrub(&self, deck: DeckId) -> Result<(), String> {
+        self.send(AudioCommand::ScrubEnd { deck })
+    }
+
     pub fn set_deck_volume(&self, deck: DeckId, volume: f32) -> Result<(), String> {
         self.send(AudioCommand::DeckVolume { deck, volume })
     }
 
+    pub fn set_deck_tempo(&self, deck: DeckId, tempo_percent: f32) -> Result<(), String> {
+        self.send(AudioCommand::DeckTempo {
+            deck,
+            tempo_percent,
+        })
+    }
+
     pub fn set_deck_filter(&self, deck: DeckId, cutoff_hz: f32) -> Result<(), String> {
         self.send(AudioCommand::DeckFilter { deck, cutoff_hz })
+    }
+
+    pub fn set_deck_filter_amount(&self, deck: DeckId, amount: f32) -> Result<(), String> {
+        self.send(AudioCommand::DeckFilterAmount { deck, amount })
+    }
+
+    pub fn set_deck_eq(&self, deck: DeckId, high: f32, mid: f32, low: f32) -> Result<(), String> {
+        self.send(AudioCommand::DeckEq {
+            deck,
+            high,
+            mid,
+            low,
+        })
     }
 
     pub fn set_deck_cue(&self, deck: DeckId, enabled: bool) -> Result<(), String> {
@@ -158,6 +191,16 @@ impl AudioEngine {
             .lock()
             .map_err(|_| "audio engine state lock poisoned".to_string())?;
         Ok(state.decks[deck.index()].position_ratio())
+    }
+
+    pub fn deck_error(&self, deck: DeckId) -> Result<Option<String>, String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "audio engine state lock poisoned".to_string())?;
+        Ok(state.decks[deck.index()]
+            .decoder_error()
+            .map(str::to_string))
     }
 
     fn send(&self, command: AudioCommand) -> Result<(), String> {
@@ -187,13 +230,37 @@ enum AudioCommand {
         deck: DeckId,
         position: f32,
     },
+    ScrubStart {
+        deck: DeckId,
+    },
+    ScrubTo {
+        deck: DeckId,
+        position: f32,
+    },
+    ScrubEnd {
+        deck: DeckId,
+    },
     DeckVolume {
         deck: DeckId,
         volume: f32,
     },
+    DeckTempo {
+        deck: DeckId,
+        tempo_percent: f32,
+    },
     DeckFilter {
         deck: DeckId,
         cutoff_hz: f32,
+    },
+    DeckFilterAmount {
+        deck: DeckId,
+        amount: f32,
+    },
+    DeckEq {
+        deck: DeckId,
+        high: f32,
+        mid: f32,
+        low: f32,
     },
     DeckCue {
         deck: DeckId,
@@ -276,12 +343,30 @@ impl MixerState {
             AudioCommand::Seek { deck, position } => {
                 self.decks[deck.index()].set_position_ratio(position)
             }
+            AudioCommand::ScrubStart { deck } => self.decks[deck.index()].start_scrub(),
+            AudioCommand::ScrubTo { deck, position } => {
+                self.decks[deck.index()].scrub_to_position_ratio(position)
+            }
+            AudioCommand::ScrubEnd { deck } => self.decks[deck.index()].end_scrub(),
             AudioCommand::DeckVolume { deck, volume } => {
                 self.decks[deck.index()].set_volume(volume)
             }
+            AudioCommand::DeckTempo {
+                deck,
+                tempo_percent,
+            } => self.decks[deck.index()].set_tempo_percent(tempo_percent),
             AudioCommand::DeckFilter { deck, cutoff_hz } => {
                 self.decks[deck.index()].set_filter_cutoff(cutoff_hz)
             }
+            AudioCommand::DeckFilterAmount { deck, amount } => {
+                self.decks[deck.index()].set_filter_amount(amount)
+            }
+            AudioCommand::DeckEq {
+                deck,
+                high,
+                mid,
+                low,
+            } => self.decks[deck.index()].set_eq(high, mid, low),
             AudioCommand::DeckCue { deck, enabled } => {
                 self.decks[deck.index()].set_cue_enabled(enabled)
             }

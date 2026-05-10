@@ -10,6 +10,37 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+pub fn validate_file(path: &Path) -> Result<(), String> {
+    let file =
+        File::open(path).map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+    let media_source = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            media_source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|error| format!("failed to probe {}: {error}", path.display()))?;
+
+    let track = probed
+        .format
+        .default_track()
+        .ok_or_else(|| format!("no default audio track in {}", path.display()))?;
+
+    symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|error| format!("failed to create decoder for {}: {error}", path.display()))?;
+
+    Ok(())
+}
+
 pub fn decode_file(path: &Path, target_sample_rate: u32) -> Result<Vec<[f32; 2]>, String> {
     let file =
         File::open(path).map_err(|error| format!("failed to open {}: {error}", path.display()))?;

@@ -121,6 +121,37 @@ fn seek_audio_deck(
 }
 
 #[tauri::command]
+fn start_audio_deck_scrub(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.start_deck_scrub(DeckId::from_label(&deck)?)
+    })
+}
+
+#[tauri::command]
+fn scrub_audio_deck_to_position(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+    position: f32,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.scrub_deck_to_position(DeckId::from_label(&deck)?, position)
+    })
+}
+
+#[tauri::command]
+fn end_audio_deck_scrub(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.end_deck_scrub(DeckId::from_label(&deck)?)
+    })
+}
+
+#[tauri::command]
 fn set_audio_deck_volume(
     state: tauri::State<'_, AudioEngineState>,
     deck: String,
@@ -132,6 +163,17 @@ fn set_audio_deck_volume(
 }
 
 #[tauri::command]
+fn set_audio_deck_tempo(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+    tempo_percent: f32,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.set_deck_tempo(DeckId::from_label(&deck)?, tempo_percent)
+    })
+}
+
+#[tauri::command]
 fn set_audio_deck_filter(
     state: tauri::State<'_, AudioEngineState>,
     deck: String,
@@ -139,6 +181,30 @@ fn set_audio_deck_filter(
 ) -> Result<(), String> {
     with_audio_engine(&state, |engine| {
         engine.set_deck_filter(DeckId::from_label(&deck)?, cutoff_hz)
+    })
+}
+
+#[tauri::command]
+fn set_audio_deck_filter_amount(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+    amount: f32,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.set_deck_filter_amount(DeckId::from_label(&deck)?, amount)
+    })
+}
+
+#[tauri::command]
+fn set_audio_deck_eq(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+    high: f32,
+    mid: f32,
+    low: f32,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.set_deck_eq(DeckId::from_label(&deck)?, high, mid, low)
     })
 }
 
@@ -171,6 +237,16 @@ fn audio_deck_position(
     })
 }
 
+#[tauri::command]
+fn audio_deck_error(
+    state: tauri::State<'_, AudioEngineState>,
+    deck: String,
+) -> Result<Option<String>, String> {
+    with_audio_engine(&state, |engine| {
+        engine.deck_error(DeckId::from_label(&deck)?)
+    })
+}
+
 fn with_audio_engine<T>(
     state: &tauri::State<'_, AudioEngineState>,
     action: impl FnOnce(&AudioEngine) -> Result<T, String>,
@@ -199,11 +275,18 @@ pub fn run() {
             play_audio_deck,
             pause_audio_deck,
             seek_audio_deck,
+            start_audio_deck_scrub,
+            scrub_audio_deck_to_position,
+            end_audio_deck_scrub,
             set_audio_deck_volume,
+            set_audio_deck_tempo,
             set_audio_deck_filter,
+            set_audio_deck_filter_amount,
+            set_audio_deck_eq,
             set_audio_deck_cue,
             set_audio_master_volume,
-            audio_deck_position
+            audio_deck_position,
+            audio_deck_error
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playcircle");

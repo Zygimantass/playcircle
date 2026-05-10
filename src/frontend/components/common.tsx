@@ -1,4 +1,3 @@
-import { useId } from "react";
 import type { Track } from "../designTypes";
 
 const BEATS_PER_BAR = 4;
@@ -94,7 +93,6 @@ export function Waveform({
   beatWindowSeconds?: number;
 }) {
   const width = 280;
-  const clipId = `wave-played-${useId().replace(/:/g, "")}`;
   const viewBoxHeight = typeof height === "number" ? height : 100;
   const middle = viewBoxHeight / 2;
   const isOverview = variant === "overview";
@@ -104,7 +102,7 @@ export function Waveform({
     ? { startSec: 0, endSec: track.totalSec }
     : beatWaveformWindow(track, beatGrid, currentSec, beatWindowBeats, beatWindowSeconds);
   const windowSpan = Math.max(0.001, windowRange.endSec - windowRange.startSec);
-  const playheadX = isOverview ? playhead * width : ((currentSec - windowRange.startSec) / windowSpan) * width;
+  const playheadX = isOverview ? playhead * width : width / 2;
   const rawDisplaySamples = isOverview
     ? track.waveform.map(([low, high], index) => ({
         low,
@@ -126,6 +124,15 @@ export function Waveform({
   const displayBars = rawDisplaySamples;
   const scale = isOverview ? 0.82 : 1;
   const waveformBands = displayBars.map(({ low, high, x, sampleSec }) => {
+    if (!isOverview && (sampleSec < 0 || sampleSec > track.totalSec)) {
+      return {
+        x,
+        low: 0,
+        mid: 0,
+        high: 0
+      };
+    }
+
     const bass = Math.max(0.04, low);
     const mid = Math.max(0.04, (low + high) / 2);
     const treble = Math.max(0.04, high * (0.65 + deterministicNoise(sampleSec, 17) * 0.1));
@@ -141,9 +148,9 @@ export function Waveform({
     };
   });
   const bandColors = {
-    low: { played: "#2f7de1", idle: "#22395c" },
-    mid: { played: "#f08a3c", idle: "#4c3425" },
-    high: { played: "#d8ca72", idle: "#51535a" }
+    low: "#2f7de1",
+    mid: "#f08a3c",
+    high: "#d8ca72"
   };
   const bandPaths = {
     low: waveformBandPath(waveformBands, (sample) => sample.low, (sample) => sample.mid, middle),
@@ -153,40 +160,13 @@ export function Waveform({
 
   return (
     <svg width="100%" height={height} viewBox={`0 0 ${width} ${viewBoxHeight}`} preserveAspectRatio="none" className="block">
-      <defs>
-        <clipPath id={clipId}>
-          <rect x="0" y="0" width={Math.max(0, Math.min(width, playheadX))} height={viewBoxHeight} />
-        </clipPath>
-      </defs>
       <rect x="0" y="0" width={width} height={viewBoxHeight} fill={isOverview ? "#090a0d" : "#07080b"} />
       <line x1="0" y1={middle} x2={width} y2={middle} stroke="#252830" strokeWidth={isOverview ? "0.7" : "1"} />
-      <path d={bandPaths.low} fill={bandColors.low.idle} opacity={isOverview ? 0.34 : 0.58} />
-      <path d={bandPaths.mid} fill={bandColors.mid.idle} opacity={isOverview ? 0.42 : 0.68} />
-      <path d={bandPaths.high} fill={bandColors.high.idle} opacity={isOverview ? 0.5 : 0.78} />
-      <g clipPath={`url(#${clipId})`}>
-        <path d={bandPaths.low} fill={bandColors.low.played} opacity={isOverview ? 0.86 : 0.98} />
-        <path d={bandPaths.mid} fill={bandColors.mid.played} opacity={isOverview ? 0.9 : 1} />
-        <path d={bandPaths.high} fill={bandColors.high.played} opacity={isOverview ? 0.92 : 1} />
-      </g>
-      {beatGrid.map((beat, index) => {
-        const x = isOverview
-          ? (beat.timeSec / track.totalSec) * width
-          : ((beat.timeSec - windowRange.startSec) / windowSpan) * width;
-        if (x < 0 || x > width) return null;
-        const downbeat = beat.beatNumber === 1;
-        return (
-          <line
-            key={`beat-${index}`}
-            x1={x}
-            y1={0}
-            x2={x}
-            y2={viewBoxHeight}
-            stroke={downbeat ? "#f4f0c9" : "#ffffff"}
-            strokeWidth={downbeat ? "0.75" : "0.35"}
-            opacity={downbeat ? "0.58" : "0.23"}
-          />
-        );
-      })}
+      <path d={bandPaths.low} fill={bandColors.low} opacity={isOverview ? 0.86 : 0.98} />
+      <path d={bandPaths.mid} fill={bandColors.mid} opacity={isOverview ? 0.9 : 1} />
+      <path d={bandPaths.high} fill={bandColors.high} opacity={isOverview ? 0.92 : 1} />
+      {!isOverview && <BeatGridMarkers beatGrid={beatGrid} width={width} height={viewBoxHeight} windowRange={windowRange} windowSpan={windowSpan} />}
+      {isOverview && <OverviewBeatMarkers beatGrid={beatGrid} width={width} height={viewBoxHeight} totalSec={track.totalSec} />}
       {track.cues.map((cue) => {
         const x = isOverview
           ? (cue.pos / track.totalSec) * width
@@ -194,8 +174,83 @@ export function Waveform({
         if (x < 0 || x > width) return null;
         return <line key={cue.id} x1={x} y1={2} x2={x} y2={viewBoxHeight - 2} stroke={cue.color} strokeWidth="1" opacity="0.85" />;
       })}
-      <line x1={playheadX} y1={0} x2={playheadX} y2={viewBoxHeight} stroke="#d6d7da" strokeWidth="1" />
+      <line x1={playheadX} y1={0} x2={playheadX} y2={viewBoxHeight} stroke="#ff3b30" strokeWidth="1" vectorEffect="non-scaling-stroke" />
     </svg>
+  );
+}
+
+function BeatGridMarkers({
+  beatGrid,
+  width,
+  height,
+  windowRange,
+  windowSpan
+}: {
+  beatGrid: NonNullable<Track["beatGrid"]>;
+  width: number;
+  height: number;
+  windowRange: { startSec: number; endSec: number };
+  windowSpan: number;
+}) {
+  return (
+    <g>
+      {beatGrid.map((beat, index) => {
+        const x = ((beat.timeSec - windowRange.startSec) / windowSpan) * width;
+        if (x < 0 || x > width) return null;
+
+        const bar = beat.beatNumber === 1;
+
+        return (
+          <line
+            key={`beat-${index}`}
+            x1={x}
+            y1={0}
+            x2={x}
+            y2={height}
+            stroke={bar ? "#ffffff" : "#8d929c"}
+            strokeWidth="1"
+            opacity={bar ? "0.96" : "0.38"}
+            vectorEffect="non-scaling-stroke"
+          />
+        );
+      })}
+    </g>
+  );
+}
+
+function OverviewBeatMarkers({
+  beatGrid,
+  width,
+  height,
+  totalSec
+}: {
+  beatGrid: NonNullable<Track["beatGrid"]>;
+  width: number;
+  height: number;
+  totalSec: number;
+}) {
+  return (
+    <g>
+      {beatGrid.map((beat, index) => {
+        if (beat.beatNumber !== 1) return null;
+        const x = (beat.timeSec / totalSec) * width;
+        if (x < 0 || x > width) return null;
+
+        return (
+          <line
+            key={`overview-bar-${index}`}
+            x1={x}
+            y1={0}
+            x2={x}
+            y2={height}
+            stroke="#ffffff"
+            strokeWidth="1"
+            opacity="0.46"
+            vectorEffect="non-scaling-stroke"
+          />
+        );
+      })}
+    </g>
   );
 }
 
@@ -293,7 +348,7 @@ function beatWaveformWindow(
     }
   }
 
-  return clampWindow(currentSec - span / 2, currentSec + span / 2, track.totalSec);
+  return { startSec: currentSec - span / 2, endSec: currentSec + span / 2 };
 }
 
 function interpolatedWaveformSample(track: Track, sampleSec: number): [number, number] {
@@ -362,17 +417,4 @@ function pulseDistance(phase: number, center: number, width: number) {
 
 function deterministicNoise(sampleSec: number, seed: number) {
   return Math.sin(sampleSec * (18.7 + seed * 2.31) + seed * 5.17);
-}
-
-function clampWindow(startSec: number, endSec: number, totalSec: number) {
-  const span = Math.max(0.001, endSec - startSec);
-  let start = Math.max(0, startSec);
-  let end = Math.min(totalSec, endSec);
-
-  if (end - start < span) {
-    if (start === 0) end = Math.min(totalSec, span);
-    else if (end === totalSec) start = Math.max(0, totalSec - span);
-  }
-
-  return { startSec: start, endSec: end };
 }

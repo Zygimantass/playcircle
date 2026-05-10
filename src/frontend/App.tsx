@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { FilterBar } from "./components/FilterBar";
 import { Inspector } from "./components/Inspector";
 import { PlayerDock } from "./components/PlayerDock";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { TrackTable } from "./components/TrackTable";
-import { loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, seekAudioDeck, setAudioDeckCue, setAudioDeckFilter, setAudioDeckVolume, setAudioMasterVolume, type DeckId } from "./api/audio";
+import { audioDeckError, audioDeckPosition, endAudioDeckScrub, loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, scrubAudioDeckToPosition, seekAudioDeck, setAudioDeckEq, setAudioDeckFilterAmount, setAudioDeckTempo, setAudioDeckVolume, setAudioMasterVolume, startAudioDeckScrub, usesBrowserAudioFixture, type DeckId } from "./api/audio";
 import { loadRekordboxBeatGrid, loadRekordboxLibrary } from "./api/rekordbox";
 import { withRekordboxLibrary } from "./data/libraryMapping";
 import type { CurrentNode, PcData, PlaylistEntry, SortableTrackKey, SortState, Track } from "./designTypes";
@@ -15,6 +15,9 @@ declare global {
     PC_DATA: PcData;
   }
 }
+
+type EqBand = "high" | "mid" | "low";
+type DeckEq = Record<EqBand, number>;
 
 export function App() {
   const mockData = useMemo(() => window.PC_DATA, []);
@@ -32,10 +35,21 @@ export function App() {
   const [deckBTrack, setDeckBTrack] = useState<Track>(mockData.TRACKS[1] ?? mockData.TRACKS[0]);
   const [deckPlaying, setDeckPlaying] = useState({ A: false, B: false });
   const [deckPositions, setDeckPositions] = useState({ A: 0.32, B: 0.12 });
+  const [deckTempos, setDeckTempos] = useState({ A: 0, B: 0 });
+  const [deckTempoRanges, setDeckTempoRanges] = useState({ A: 10, B: 10 });
+  const [syncMaster, setSyncMaster] = useState<DeckId>("A");
+  const [syncEnabled, setSyncEnabled] = useState({ A: false, B: false });
   const [deckVolumes, setDeckVolumes] = useState({ A: 0.82, B: 0.82 });
-  const [deckFilters, setDeckFilters] = useState({ A: 20_000, B: 20_000 });
-  const [deckCue, setDeckCue] = useState({ A: false, B: false });
+  const [deckEq, setDeckEqState] = useState<Record<DeckId, DeckEq>>({
+    A: { high: 0, mid: 0, low: 0 },
+    B: { high: 0, mid: 0, low: 0 }
+  });
+  const [deckFilterAmounts, setDeckFilterAmounts] = useState({ A: 0, B: 0 });
+  const [deckCuePoints, setDeckCuePoints] = useState({ A: 0, B: 0 });
+  const tempoSendTimeouts = useRef<Record<DeckId, number | null>>({ A: null, B: null });
+  const deckPositionsRef = useRef(deckPositions);
   const [loadedDeckPaths, setLoadedDeckPaths] = useState<{ A: string | null; B: string | null }>({ A: null, B: null });
+  const [crossfader, setCrossfader] = useState(0);
   const [masterVolume, setMasterVolume] = useState(0.9);
   const [audioStatus, setAudioStatus] = useState("Rust audio engine ready");
   const [baseTrack, setBaseTrack] = useState<Track | null>(null);
@@ -50,6 +64,14 @@ export function App() {
     });
     return membership;
   });
+
+  const reportAudioError = useCallback((error: unknown) => {
+    setAudioStatus(error instanceof Error ? error.message : String(error));
+  }, []);
+
+  useEffect(() => {
+    deckPositionsRef.current = deckPositions;
+  }, [deckPositions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -119,22 +141,91 @@ export function App() {
       const delta = (now - last) / 1000;
       last = now;
       setDeckPositions((positions) => {
-        const nextA = deckPlaying.A ? Math.min(1, positions.A + delta / deckATrack.totalSec) : positions.A;
-        const nextB = deckPlaying.B ? Math.min(1, positions.B + delta / deckBTrack.totalSec) : positions.B;
+        const nextA = deckPlaying.A ? Math.min(1, positions.A + (delta * playbackRateFromTempo(deckTempos.A)) / deckATrack.totalSec) : positions.A;
+        const nextB = deckPlaying.B ? Math.min(1, positions.B + (delta * playbackRateFromTempo(deckTempos.B)) / deckBTrack.totalSec) : positions.B;
+        const nextPositions = { A: nextA, B: nextB };
+        const follower = otherDeck(syncMaster);
+        if (syncEnabled[follower] && deckPlaying[follower] && deckPlaying[syncMaster]) {
+          const lockedPosition = syncedPositionForDeck(follower, syncMaster, deckATrack, deckBTrack, nextPositions);
+          if (lockedPosition !== null) nextPositions[follower] = lockedPosition;
+        }
+
         if ((deckPlaying.A && nextA >= 1) || (deckPlaying.B && nextB >= 1)) {
           setDeckPlaying((playing) => ({
             A: playing.A && nextA < 1,
             B: playing.B && nextB < 1
           }));
         }
-        return { A: nextA, B: nextB };
+        return nextPositions;
       });
       raf = requestAnimationFrame(tick);
     };
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [deckATrack.totalSec, deckBTrack.totalSec, deckPlaying.A, deckPlaying.B]);
+  }, [deckATrack, deckBTrack, deckPlaying.A, deckPlaying.B, deckTempos.A, deckTempos.B, syncEnabled, syncMaster]);
+
+  useEffect(() => {
+    if (usesBrowserAudioFixture()) return undefined;
+    if (!deckPlaying.A && !deckPlaying.B) return undefined;
+
+    let cancelled = false;
+    const syncPosition = () => {
+      const requests: Array<Promise<[DeckId, number]>> = [];
+      if (deckPlaying.A) requests.push(audioDeckPosition("A").then((position) => ["A", position] as [DeckId, number]));
+      if (deckPlaying.B) requests.push(audioDeckPosition("B").then((position) => ["B", position] as [DeckId, number]));
+
+      Promise.all(requests)
+        .then((positions) => {
+          if (cancelled) return;
+          setDeckPositions((current) => {
+            const next = { ...current };
+            positions.forEach(([deck, position]) => {
+              next[deck] = position;
+            });
+            return next;
+          });
+        })
+        .catch(reportAudioError);
+    };
+
+    syncPosition();
+    const interval = window.setInterval(syncPosition, 250);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [deckPlaying.A, deckPlaying.B, reportAudioError]);
+
+  useEffect(() => {
+    if (usesBrowserAudioFixture()) return undefined;
+    if (!deckPlaying.A && !deckPlaying.B) return undefined;
+
+    let cancelled = false;
+    const checkErrors = () => {
+      const requests: Array<Promise<[DeckId, string | null]>> = [];
+      if (deckPlaying.A) requests.push(audioDeckError("A").then((error) => ["A", error] as [DeckId, string | null]));
+      if (deckPlaying.B) requests.push(audioDeckError("B").then((error) => ["B", error] as [DeckId, string | null]));
+
+      Promise.all(requests)
+        .then((errors) => {
+          if (cancelled) return;
+          errors.forEach(([deck, error]) => {
+            if (!error) return;
+            setDeckPlaying((current) => ({ ...current, [deck]: false }));
+            setAudioStatus(`Deck ${deck}: ${error}`);
+          });
+        })
+        .catch(reportAudioError);
+    };
+
+    checkErrors();
+    const interval = window.setInterval(checkErrors, 250);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [deckPlaying.A, deckPlaying.B, reportAudioError]);
 
   const openPalette = useCallback(() => {
     setPaletteOpen(true);
@@ -153,10 +244,6 @@ export function App() {
     setFlashCrate(crateId);
     window.setTimeout(() => setFlashCrate(null), 700);
   }, [multiSelected]);
-
-  const reportAudioError = useCallback((error: unknown) => {
-    setAudioStatus(error instanceof Error ? error.message : String(error));
-  }, []);
 
   const ensureDeckLoaded = useCallback(async (deck: DeckId, track: Track) => {
     if (!track.filePath) {
@@ -219,15 +306,27 @@ export function App() {
     if (deck === "A") setDeckATrack(track);
     else setDeckBTrack(track);
     setDeckPositions((positions) => ({ ...positions, [deck]: 0 }));
+    setDeckCuePoints((cuePoints) => ({ ...cuePoints, [deck]: 0 }));
     setDeckPlaying((playing) => ({ ...playing, [deck]: false }));
     ensureDeckLoaded(deck, track).catch(reportAudioError);
     loadAnalysisForTrack(track)
       .then((trackWithAnalysis) => {
-        if (deck === "A") setDeckATrack(trackWithAnalysis);
-        else setDeckBTrack(trackWithAnalysis);
+        if (deck === "A") {
+          setDeckATrack((current) => current.id === track.id ? trackWithAnalysis : current);
+        } else {
+          setDeckBTrack((current) => current.id === track.id ? trackWithAnalysis : current);
+        }
       })
       .catch(reportAudioError);
   }, [ensureDeckLoaded, loadAnalysisForTrack, reportAudioError]);
+
+  const loadDeckByTrackId = useCallback((deck: DeckId, trackId: string) => {
+    const track = data.TRACKS.find((item) => item.id === trackId);
+    if (!track) return;
+    setSelected(track.id);
+    setPreviewTrack(track);
+    loadDeck(deck, track);
+  }, [data.TRACKS, loadDeck]);
 
   const setDeckPlayback = useCallback((deck: DeckId, playing: boolean) => {
     const track = deck === "A" ? deckATrack : deckBTrack;
@@ -257,20 +356,140 @@ export function App() {
     seekAudioDeck(deck, position).catch(reportAudioError);
   }, [reportAudioError]);
 
+  const startDeckScrub = useCallback((deck: DeckId) => {
+    setDeckPlaying((current) => ({ ...current, [deck]: false }));
+    pauseAudioDeck(deck)
+      .then(() => startAudioDeckScrub(deck))
+      .catch(reportAudioError);
+  }, [reportAudioError]);
+
+  const scrubDeckPosition = useCallback((deck: DeckId, position: number) => {
+    setDeckPositions((current) => ({ ...current, [deck]: position }));
+    scrubAudioDeckToPosition(deck, position).catch(reportAudioError);
+  }, [reportAudioError]);
+
+  const endDeckScrub = useCallback((deck: DeckId, resume: boolean) => {
+    endAudioDeckScrub(deck)
+      .then(() => {
+        if (resume) setDeckPlayback(deck, true);
+      })
+      .catch(reportAudioError);
+  }, [reportAudioError, setDeckPlayback]);
+
   const setDeckVolume = useCallback((deck: DeckId, volume: number) => {
     setDeckVolumes((current) => ({ ...current, [deck]: volume }));
-    setAudioDeckVolume(deck, volume).catch(reportAudioError);
+    setAudioDeckVolume(deck, volume * crossfadeGain(deck, crossfader)).catch(reportAudioError);
+  }, [crossfader, reportAudioError]);
+
+  const setDeckTempo = useCallback((deck: DeckId, tempoPercent: number) => {
+    setDeckTempos((current) => ({ ...current, [deck]: tempoPercent }));
+    const pending = tempoSendTimeouts.current[deck];
+    if (pending !== null) window.clearTimeout(pending);
+    tempoSendTimeouts.current[deck] = window.setTimeout(() => {
+      tempoSendTimeouts.current[deck] = null;
+      setAudioDeckTempo(deck, tempoPercent).catch(reportAudioError);
+    }, 40);
   }, [reportAudioError]);
 
-  const setDeckFilter = useCallback((deck: DeckId, cutoffHz: number) => {
-    setDeckFilters((current) => ({ ...current, [deck]: cutoffHz }));
-    setAudioDeckFilter(deck, cutoffHz).catch(reportAudioError);
+  const beatSyncDeck = useCallback((deck: DeckId) => {
+    if (deck === syncMaster) {
+      setSyncMaster(deck);
+      setSyncEnabled((current) => ({ ...current, [deck]: false }));
+      return;
+    }
+
+    if (syncEnabled[deck]) {
+      setSyncEnabled((current) => ({ ...current, [deck]: false }));
+      return;
+    }
+
+    const master = syncMaster;
+    const nextTempo = syncedTempoForDeck(deck, master, deckATrack, deckBTrack, deckTempos);
+    const nextPosition = syncedPositionForDeck(deck, master, deckATrack, deckBTrack, deckPositions);
+
+    setSyncEnabled((current) => ({ ...current, [deck]: true, [master]: false }));
+    if (nextTempo !== null) setDeckTempo(deck, nextTempo);
+    if (nextPosition !== null) setDeckPosition(deck, nextPosition);
+  }, [deckATrack, deckBTrack, deckPositions, deckTempos, setDeckPosition, setDeckTempo, syncEnabled, syncMaster]);
+
+  const setDeckAsMaster = useCallback((deck: DeckId) => {
+    setSyncMaster(deck);
+    setSyncEnabled((current) => ({ ...current, [deck]: false }));
+  }, []);
+
+  useEffect(() => {
+    const follower = otherDeck(syncMaster);
+    if (!syncEnabled[follower]) return;
+
+    const nextTempo = syncedTempoForDeck(follower, syncMaster, deckATrack, deckBTrack, deckTempos);
+    if (nextTempo === null || Math.abs(nextTempo - deckTempos[follower]) < 0.01) return;
+    setDeckTempo(follower, nextTempo);
+  }, [deckATrack, deckBTrack, deckTempos, setDeckTempo, syncEnabled, syncMaster]);
+
+  useEffect(() => {
+    const follower = otherDeck(syncMaster);
+    if (!syncEnabled[follower] || !deckPlaying[follower] || !deckPlaying[syncMaster]) return undefined;
+
+    const interval = window.setInterval(() => {
+      const positions = deckPositionsRef.current;
+      const targetPosition = syncedPositionForDeck(follower, syncMaster, deckATrack, deckBTrack, positions);
+      if (targetPosition === null) return;
+
+      const followerTrack = follower === "A" ? deckATrack : deckBTrack;
+      const diffSec = Math.abs(targetPosition - positions[follower]) * followerTrack.totalSec;
+      if (diffSec < 0.012) return;
+      setDeckPosition(follower, targetPosition);
+    }, 125);
+
+    return () => window.clearInterval(interval);
+  }, [deckATrack, deckBTrack, deckPlaying, setDeckPosition, syncEnabled, syncMaster]);
+
+  const cycleDeckTempoRange = useCallback((deck: DeckId) => {
+    const nextRange = nextTempoRange(deckTempoRanges[deck]);
+    setDeckTempoRanges((current) => ({ ...current, [deck]: nextRange }));
+
+    const clampedTempo = clamp(deckTempos[deck], -nextRange, nextRange);
+    if (clampedTempo !== deckTempos[deck]) {
+      setDeckTempo(deck, clampedTempo);
+    }
+  }, [deckTempoRanges, deckTempos, setDeckTempo]);
+
+  useEffect(() => {
+    const pending = tempoSendTimeouts.current;
+    return () => {
+      if (pending.A !== null) window.clearTimeout(pending.A);
+      if (pending.B !== null) window.clearTimeout(pending.B);
+    };
+  }, []);
+
+  const setMixerCrossfader = useCallback((value: number) => {
+    setCrossfader(value);
+    setAudioDeckVolume("A", deckVolumes.A * crossfadeGain("A", value)).catch(reportAudioError);
+    setAudioDeckVolume("B", deckVolumes.B * crossfadeGain("B", value)).catch(reportAudioError);
+  }, [deckVolumes.A, deckVolumes.B, reportAudioError]);
+
+  const setDeckEq = useCallback((deck: DeckId, band: EqBand, value: number) => {
+    const nextEq = { ...deckEq[deck], [band]: value };
+    setDeckEqState((current) => ({ ...current, [deck]: nextEq }));
+    setAudioDeckEq(deck, nextEq.high, nextEq.mid, nextEq.low).catch(reportAudioError);
+  }, [deckEq, reportAudioError]);
+
+  const setDeckFilter = useCallback((deck: DeckId, amount: number) => {
+    setDeckFilterAmounts((current) => ({ ...current, [deck]: amount }));
+    setAudioDeckFilterAmount(deck, amount).catch(reportAudioError);
   }, [reportAudioError]);
 
-  const setDeckCueEnabled = useCallback((deck: DeckId, enabled: boolean) => {
-    setDeckCue((current) => ({ ...current, [deck]: enabled }));
-    setAudioDeckCue(deck, enabled).catch(reportAudioError);
-  }, [reportAudioError]);
+  const handleDeckCueAction = useCallback((deck: DeckId) => {
+    const playing = deck === "A" ? deckPlaying.A : deckPlaying.B;
+    const position = deck === "A" ? deckPositions.A : deckPositions.B;
+    const cuePoint = deck === "A" ? deckCuePoints.A : deckCuePoints.B;
+
+    if (playing) {
+      setDeckPosition(deck, cuePoint);
+    } else {
+      setDeckCuePoints((current) => ({ ...current, [deck]: position }));
+    }
+  }, [deckCuePoints.A, deckCuePoints.B, deckPlaying.A, deckPlaying.B, deckPositions.A, deckPositions.B, setDeckPosition]);
 
   const updateMasterVolume = useCallback((volume: number) => {
     setMasterVolume(volume);
@@ -292,7 +511,9 @@ export function App() {
           reportAudioError(error);
         });
       loadAnalysisForTrack(track)
-        .then(setDeckATrack)
+        .then((trackWithAnalysis) => {
+          setDeckATrack((current) => current.id === track.id ? trackWithAnalysis : current);
+        })
         .catch(reportAudioError);
     }
   }, [ensureDeckLoaded, loadAnalysisForTrack, reportAudioError]);
@@ -301,14 +522,20 @@ export function App() {
     if (libraryStatus !== "rekordbox") return undefined;
 
     let cancelled = false;
+    const deckATrackId = deckATrack.id;
+    const deckBTrackId = deckBTrack.id;
     loadAnalysisForTrack(deckATrack)
       .then((track) => {
-        if (!cancelled && track !== deckATrack) setDeckATrack(track);
+        if (!cancelled && track.id === deckATrackId && track !== deckATrack) {
+          setDeckATrack((current) => current.id === deckATrackId ? track : current);
+        }
       })
       .catch(reportAudioError);
     loadAnalysisForTrack(deckBTrack)
       .then((track) => {
-        if (!cancelled && track !== deckBTrack) setDeckBTrack(track);
+        if (!cancelled && track.id === deckBTrackId && track !== deckBTrack) {
+          setDeckBTrack((current) => current.id === deckBTrackId ? track : current);
+        }
       })
       .catch(reportAudioError);
 
@@ -354,20 +581,54 @@ export function App() {
           <Inspector track={previewTrack} />
         </div>
       ) : (
-        <PlayerDock
-          audioStatus={audioStatus}
-          deckA={{ track: deckATrack, playing: deckPlaying.A, position: deckPositions.A, volume: deckVolumes.A, filterCutoff: deckFilters.A, cue: deckCue.A }}
-          deckB={{ track: deckBTrack, playing: deckPlaying.B, position: deckPositions.B, volume: deckVolumes.B, filterCutoff: deckFilters.B, cue: deckCue.B }}
-          masterVolume={masterVolume}
-          selectedTrack={previewTrack}
-          onLoadDeck={loadDeck}
-          onSetCue={setDeckCueEnabled}
-          onSetFilter={setDeckFilter}
-          onSetMasterVolume={updateMasterVolume}
-          onSetPlaying={setDeckPlayback}
-          onSetPosition={setDeckPosition}
-          onSetVolume={setDeckVolume}
-        />
+        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(0,1fr)]">
+          <PlayerDock
+            deckA={{ track: deckATrack, playing: deckPlaying.A, position: deckPositions.A, syncEnabled: syncEnabled.A, syncRole: syncMaster === "A" ? "master" : "follower", tempoPercent: deckTempos.A, tempoRange: deckTempoRanges.A, volume: deckVolumes.A, eq: deckEq.A, filterAmount: deckFilterAmounts.A, cuePoint: deckCuePoints.A }}
+            deckB={{ track: deckBTrack, playing: deckPlaying.B, position: deckPositions.B, syncEnabled: syncEnabled.B, syncRole: syncMaster === "B" ? "master" : "follower", tempoPercent: deckTempos.B, tempoRange: deckTempoRanges.B, volume: deckVolumes.B, eq: deckEq.B, filterAmount: deckFilterAmounts.B, cuePoint: deckCuePoints.B }}
+            crossfader={crossfader}
+            onBeatSync={beatSyncDeck}
+            onCycleTempoRange={cycleDeckTempoRange}
+            onLoadDeck={loadDeckByTrackId}
+            onSetMasterDeck={setDeckAsMaster}
+            onSetCrossfader={setMixerCrossfader}
+            onCueAction={handleDeckCueAction}
+            onSetEq={setDeckEq}
+            onSetFilter={setDeckFilter}
+            onSetPlaying={setDeckPlayback}
+            onSetPosition={setDeckPosition}
+            onSetTempo={setDeckTempo}
+            onSetVolume={setDeckVolume}
+            onScratchEnd={endDeckScrub}
+            onScratchMove={scrubDeckPosition}
+            onScratchStart={startDeckScrub}
+          />
+          <div className="grid min-h-0 grid-cols-[220px_minmax(0,1fr)] border-t border-line">
+            <Sidebar
+              data={data}
+              currentNode={currentNode}
+              setCurrentNode={setCurrentNode}
+              onDropToCrate={onDropToCrate}
+              dragHoverCrate={flashCrate || dragHoverCrate}
+              setDragHoverCrate={setDragHoverCrate}
+            />
+            <LibraryWorkspace
+              baseTrack={baseTrack}
+              crateMembership={crateMembership}
+              currentNode={currentNode}
+              data={data}
+              filterQuery={filterQuery}
+              hoveredId={hoveredId}
+              multiSelected={multiSelected}
+              onPreview={onPreview}
+              selected={selected}
+              setBaseTrack={setBaseTrack}
+              setFilterQuery={setFilterQuery}
+              setHoveredId={setHoveredId}
+              setMultiSelected={setMultiSelected}
+              setSelected={setSelected}
+            />
+          </div>
+        </div>
       )}
       {paletteOpen && (
         <div className="fixed inset-0 z-20 flex items-start justify-center bg-black/40 pt-[72px]" onClick={() => setPaletteOpen(false)}>
@@ -411,6 +672,88 @@ function sampleEnergyCurve(waveform: Array<[number, number]>, count: number) {
     const sampleIndex = Math.min(waveform.length - 1, Math.round(ratio * (waveform.length - 1)));
     return waveform[sampleIndex]?.[1] ?? 0;
   });
+}
+
+function crossfadeGain(deck: DeckId, crossfader: number) {
+  const value = Math.max(-1, Math.min(1, crossfader));
+  if (deck === "A") return value <= 0 ? 1 : 1 - value;
+  return value >= 0 ? 1 : 1 + value;
+}
+
+function playbackRateFromTempo(tempoPercent: number) {
+  return Math.max(0.05, 1 + tempoPercent / 100);
+}
+
+function otherDeck(deck: DeckId): DeckId {
+  return deck === "A" ? "B" : "A";
+}
+
+function nextTempoRange(currentRange: number) {
+  if (currentRange === 6) return 10;
+  if (currentRange === 10) return 16;
+  return 6;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function syncedTempoForDeck(
+  follower: DeckId,
+  master: DeckId,
+  deckATrack: Track,
+  deckBTrack: Track,
+  deckTempos: Record<DeckId, number>
+) {
+  const masterTrack = master === "A" ? deckATrack : deckBTrack;
+  const followerTrack = follower === "A" ? deckATrack : deckBTrack;
+  if (masterTrack.bpm <= 0 || followerTrack.bpm <= 0) return null;
+
+  const masterBpm = masterTrack.bpm * playbackRateFromTempo(deckTempos[master]);
+  return ((masterBpm / followerTrack.bpm) - 1) * 100;
+}
+
+function syncedPositionForDeck(
+  follower: DeckId,
+  master: DeckId,
+  deckATrack: Track,
+  deckBTrack: Track,
+  deckPositions: Record<DeckId, number>
+) {
+  const masterTrack = master === "A" ? deckATrack : deckBTrack;
+  const followerTrack = follower === "A" ? deckATrack : deckBTrack;
+  const masterPositionSec = deckPositions[master] * masterTrack.totalSec;
+  const followerPositionSec = deckPositions[follower] * followerTrack.totalSec;
+  const masterPhase = beatPhaseAt(masterTrack, masterPositionSec);
+  const followerSegment = beatSegmentAt(followerTrack, followerPositionSec);
+  const nextFollowerSec = followerSegment.startSec + masterPhase * followerSegment.spanSec;
+
+  return clamp(nextFollowerSec / followerTrack.totalSec, 0, 1);
+}
+
+function beatPhaseAt(track: Track, positionSec: number) {
+  const segment = beatSegmentAt(track, positionSec);
+  return clamp((positionSec - segment.startSec) / segment.spanSec, 0, 1);
+}
+
+function beatSegmentAt(track: Track, positionSec: number) {
+  const beatGrid = track.beatGrid ?? [];
+  if (beatGrid.length >= 2) {
+    const nextIndex = beatGrid.findIndex((beat) => beat.timeSec > positionSec);
+    const currentIndex = Math.max(0, nextIndex === -1 ? beatGrid.length - 2 : nextIndex - 1);
+    const current = beatGrid[currentIndex];
+    const next = beatGrid[Math.min(beatGrid.length - 1, currentIndex + 1)];
+    return {
+      startSec: current.timeSec,
+      spanSec: Math.max(0.001, next.timeSec - current.timeSec)
+    };
+  }
+
+  const spanSec = track.bpm > 0 ? 60 / track.bpm : 0.5;
+  return {
+    startSec: Math.floor(positionSec / spanSec) * spanSec,
+    spanSec
+  };
 }
 
 function LibraryWorkspace({
