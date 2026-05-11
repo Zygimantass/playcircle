@@ -600,7 +600,7 @@ function MixerCenter({
   }, [fxMenuOpen]);
 
   return (
-    <div className={classNames("grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_42px_58px_34px] border-x border-line bg-surface-1", trackDragActive && "pointer-events-none")}>
+    <div className={classNames("grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_42px_74px_34px] border-x border-line bg-surface-1", trackDragActive && "pointer-events-none")}>
       <div className="grid min-h-0 grid-cols-2 gap-2 px-3 py-2">
         <MixerDeckStrip
           deck="A"
@@ -690,6 +690,31 @@ function MixerCenter({
         <div className="grid min-w-0 grid-cols-[36px_minmax(0,1fr)] items-center gap-2">
           <span>MIX</span>
           <span className="min-w-0 truncate text-right text-text-1">{Math.round(focusedFx.mix * 100)}% · {fxTimingLabel(focusedFx)}</span>
+        </div>
+        <div className="grid min-w-0 grid-cols-[36px_minmax(0,1fr)_52px] items-center gap-2">
+          <span>TO</span>
+          <div className="flex min-w-0 gap-1">
+            {(["A", "B"] as const).map((deck) => {
+              const routed = fxState.target === deck || fxState.target === "both";
+              const live = focusedFx.enabled && routed;
+              return (
+                <span
+                  key={deck}
+                  className={classNames(
+                    "grid h-4 min-w-7 place-items-center rounded-sm border px-1 text-[9px]",
+                    live
+                      ? "border-accent bg-accent/15 text-text-1"
+                      : routed
+                        ? "border-line-2 bg-surface-2 text-text-2"
+                        : "border-line bg-transparent text-text-3"
+                  )}
+                >
+                  {deck}
+                </span>
+              );
+            })}
+          </div>
+          <span className={classNames("text-right", focusedFx.enabled ? "text-accent" : "text-text-3")}>{focusedFx.enabled ? "ACTIVE" : "OFF"}</span>
         </div>
       </div>
       <div className="grid min-h-0 border-t border-line px-3 py-1.5">

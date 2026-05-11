@@ -443,9 +443,7 @@ impl Deck {
                     self.buffer.extend(frames);
                 }
                 DecodeMessage::Finished => {
-                    if self.total_frames.is_none() {
-                        self.total_frames = Some(self.decoded_frames);
-                    }
+                    self.total_frames = Some(self.decoded_frames);
                     self.decoder_finished = true;
                     self.decoder = None;
                     break;
@@ -1429,6 +1427,30 @@ mod tests {
 
         assert!((deck.position_ratio() - 0.995).abs() < 0.001);
         assert_eq!(deck.played_frames, 199.0);
+    }
+
+    #[test]
+    fn finished_stream_uses_actual_decoded_length_over_metadata() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut deck = Deck::new(44_100.0);
+        deck.load_stream(receiver);
+
+        sender
+            .send(crate::decoder::DecodeMessage::Metadata {
+                total_frames: Some(200),
+            })
+            .expect("send metadata");
+        sender
+            .send(crate::decoder::DecodeMessage::Frames(vec![[0.0, 0.0]; 100]))
+            .expect("send frames");
+        sender
+            .send(crate::decoder::DecodeMessage::Finished)
+            .expect("finish decode");
+
+        deck.set_position_ratio(1.0);
+
+        assert!((deck.total_seconds() - (100.0 / 44_100.0)).abs() < f64::EPSILON);
+        assert_eq!(deck.played_frames, 99.0);
     }
 
     #[test]

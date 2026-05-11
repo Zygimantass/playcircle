@@ -14,7 +14,7 @@ import type { ControllerAction } from "./api/controller";
 import { addRekordboxTracksToPlaylist, createRekordboxPlaylist, loadRekordboxBeatGrid, loadRekordboxLibrary, moveRekordboxPlaylistToFolder } from "./api/rekordbox";
 import { withRekordboxLibrary } from "./data/libraryMapping";
 import type { CurrentNode, PcData, PlaylistEntry, Track } from "./designTypes";
-import { clamp, crossfadeGain, estimatedDeckLevelDb, nextTempoRange, otherDeck, playbackRateFromTempo, sampleEnergyCurve, smoothMeterDb, syncedTempoForDeck } from "./lib/audioMath";
+import { clamp, crossfadeGain, estimatedDeckLevelDb, nextTempoRange, otherDeck, playbackRateFromTempo, sampleEnergyCurve, smoothMeterDb, syncedPositionForDeck, syncedTempoForDeck } from "./lib/audioMath";
 import { CONTROLLER_FX_KINDS, adjustFxBeat, audioFxConfigForSlot, cloneControllerFxState, controllerFxTarget, createControllerFxState, deckIdFromControllerAction, defaultControllerFxSlot, fxKindLabel, fxTargetLabel, fxTimingLabel, sendControllerFxFeedback, type ControllerFxDebugState, type ControllerFxState } from "./lib/controllerFx";
 import { deckFromDndDropId, deckFromDndTranslatedRect } from "./lib/dnd";
 import { currentNodesEqual, findPlaylist, findPlaylistParentNode, libraryBrowserNodes, movePlaylistEntry, playlistContains, recalculatePlaylistCounts, statusText, updatePlaylistEntries } from "./lib/library";
@@ -37,6 +37,11 @@ function audioBeatGridForTrack(track: Track): AudioBeatGridMarker[] {
     timeSeconds: beat.timeSec,
     beatNumber: beat.beatNumber
   }));
+}
+
+function formatDuration(seconds: number) {
+  const total = Math.max(0, Math.round(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
 export function App() {
@@ -299,6 +304,11 @@ export function App() {
         const nextA = deckPlaying.A ? Math.min(1, positions.A + (delta * playbackRateFromTempo(deckTempos.A)) / deckATrack.totalSec) : positions.A;
         const nextB = deckPlaying.B ? Math.min(1, positions.B + (delta * playbackRateFromTempo(deckTempos.B)) / deckBTrack.totalSec) : positions.B;
         const nextPositions = { A: nextA, B: nextB };
+        const follower = otherDeck(syncMaster);
+        if (syncEnabled[follower] && deckPlaying[follower] && deckPlaying[syncMaster]) {
+          const syncedPosition = syncedPositionForDeck(follower, syncMaster, deckATrack, deckBTrack, nextPositions);
+          if (syncedPosition !== null) nextPositions[follower] = syncedPosition;
+        }
 
         if ((deckPlaying.A && nextA >= 1) || (deckPlaying.B && nextB >= 1)) {
           setDeckPlaying((playing) => ({
@@ -313,7 +323,7 @@ export function App() {
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [deckATrack, deckBTrack, deckPlaying.A, deckPlaying.B, deckTempos.A, deckTempos.B]);
+  }, [deckATrack, deckBTrack, deckPlaying.A, deckPlaying.B, deckTempos.A, deckTempos.B, syncEnabled, syncMaster]);
 
   useEffect(() => {
     if (usesBrowserAudioFixture()) return undefined;
@@ -333,6 +343,11 @@ export function App() {
             positions.forEach(([deck, position]) => {
               next[deck] = position;
             });
+            const follower = otherDeck(syncMaster);
+            if (syncEnabled[follower] && deckPlaying[follower] && deckPlaying[syncMaster]) {
+              const syncedPosition = syncedPositionForDeck(follower, syncMaster, deckATrack, deckBTrack, next);
+              if (syncedPosition !== null) next[follower] = syncedPosition;
+            }
             return next;
           });
         })
@@ -345,7 +360,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [deckPlaying.A, deckPlaying.B, reportAudioError]);
+  }, [deckATrack, deckBTrack, deckPlaying.A, deckPlaying.B, reportAudioError, syncEnabled, syncMaster]);
 
   useEffect(() => {
     if (!deckPlaying.A && !deckPlaying.B) {
@@ -583,11 +598,15 @@ export function App() {
   const loadWaveformForTrack = useCallback(async (track: Track) => {
     if (track.waveformSource === "audio" || !track.filePath) return track;
 
-    const waveform = await loadAudioWaveform(track.filePath, 512);
+    const audioWaveform = await loadAudioWaveform(track.filePath, 512);
+    const waveform = audioWaveform.waveform;
     if (waveform.length === 0) return track;
+    const totalSec = audioWaveform.durationSeconds > 0 ? audioWaveform.durationSeconds : track.totalSec;
 
     return {
       ...track,
+      duration: formatDuration(totalSec),
+      totalSec,
       waveform,
       waveformSource: "audio" as const,
       energyCurve: sampleEnergyCurve(waveform, 24)
@@ -909,24 +928,24 @@ export function App() {
     }, 40);
   }, [reportAudioError]);
 
-  const loadDeckBeatGridForSync = useCallback(async (deck: DeckId) => {
+  const loadDeckTrackForSync = useCallback(async (deck: DeckId) => {
     const track = deck === "A" ? deckATrack : deckBTrack;
-    const trackWithBeatGrid = await loadBeatGridForTrack(track);
-    if (trackWithBeatGrid !== track) {
+    const trackWithAnalysis = await loadAnalysisForTrack(track);
+    if (trackWithAnalysis !== track) {
       if (deck === "A") {
-        setDeckATrack((current) => current.id === track.id ? trackWithBeatGrid : current);
+        setDeckATrack((current) => current.id === track.id ? trackWithAnalysis : current);
       } else {
-        setDeckBTrack((current) => current.id === track.id ? trackWithBeatGrid : current);
+        setDeckBTrack((current) => current.id === track.id ? trackWithAnalysis : current);
       }
     }
-    return trackWithBeatGrid;
-  }, [deckATrack, deckBTrack, loadBeatGridForTrack]);
+    return trackWithAnalysis;
+  }, [deckATrack, deckBTrack, loadAnalysisForTrack]);
 
   const configureBackendBeatSync = useCallback(async (follower: DeckId, master: DeckId, enabled: boolean) => {
     const [followerTrack, masterTrack] = enabled
       ? await Promise.all([
-          loadDeckBeatGridForSync(follower),
-          loadDeckBeatGridForSync(master)
+          loadDeckTrackForSync(follower),
+          loadDeckTrackForSync(master)
         ])
       : [
           follower === "A" ? deckATrack : deckBTrack,
@@ -939,10 +958,11 @@ export function App() {
       enabled,
       followerBpm: followerTrack.bpm,
       masterBpm: masterTrack.bpm,
+      masterPlaybackRate: playbackRateFromTempo(deckTempos[master]),
       followerBeatGrid: audioBeatGridForTrack(followerTrack),
       masterBeatGrid: audioBeatGridForTrack(masterTrack)
     });
-  }, [deckATrack, deckBTrack, loadDeckBeatGridForSync]);
+  }, [deckATrack, deckBTrack, deckTempos, loadDeckTrackForSync]);
 
   const resyncBeatSyncForPlayback = useCallback(async (startedDeck: DeckId) => {
     const follower = syncEnabled.A ? "A" : syncEnabled.B ? "B" : null;

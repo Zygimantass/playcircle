@@ -56,6 +56,13 @@ impl From<AudioOutputDevice> for AudioOutputDeviceDto {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioWaveformDto {
+    waveform: Vec<(f32, f32)>,
+    duration_seconds: f64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AudioBeatGridMarkerDto {
@@ -229,11 +236,17 @@ fn default_demo_database_path() -> PathBuf {
 }
 
 #[tauri::command]
-async fn load_audio_waveform(path: String, bins: Option<usize>) -> Result<Vec<(f32, f32)>, String> {
+async fn load_audio_waveform(
+    path: String,
+    bins: Option<usize>,
+) -> Result<AudioWaveformDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let bins = bins.unwrap_or(512).clamp(32, 4096);
         let frames = decode_file(PathBuf::from(&path).as_path(), 44_100)?;
-        Ok(audio_waveform(&frames, bins))
+        Ok(AudioWaveformDto {
+            duration_seconds: frames.len() as f64 / 44_100.0,
+            waveform: audio_waveform(&frames, bins),
+        })
     })
     .await
     .map_err(|error| format!("waveform task failed: {error}"))?
@@ -421,6 +434,7 @@ fn set_audio_deck_beat_sync(
     enabled: bool,
     follower_bpm: f64,
     master_bpm: f64,
+    master_playback_rate: f64,
     follower_beat_grid: Vec<AudioBeatGridMarkerDto>,
     master_beat_grid: Vec<AudioBeatGridMarkerDto>,
 ) -> Result<(), String> {
@@ -433,6 +447,7 @@ fn set_audio_deck_beat_sync(
             enabled,
             follower_bpm,
             master_bpm,
+            master_playback_rate,
             follower_beat_grid,
             master_beat_grid,
         )

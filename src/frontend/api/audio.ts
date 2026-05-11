@@ -15,6 +15,10 @@ export type AudioBeatGridMarker = {
   timeSeconds: number;
   beatNumber: number;
 };
+export type AudioWaveform = {
+  waveform: Array<[number, number]>;
+  durationSeconds: number;
+};
 
 export type AudioOutputDevice = {
   id: string;
@@ -46,9 +50,9 @@ export function loadAudioDeck(deck: DeckId, path: string) {
 }
 
 export function loadAudioWaveform(path: string, bins = 512) {
-  if (usesBrowserAudioFixture()) return Promise.resolve<Array<[number, number]>>([]);
+  if (usesBrowserAudioFixture()) return Promise.resolve<AudioWaveform>({ waveform: [], durationSeconds: 0 });
 
-  return invoke<Array<[number, number]>>("load_audio_waveform", { path, bins });
+  return invoke<AudioWaveform>("load_audio_waveform", { path, bins });
 }
 
 export function listAudioOutputs() {
@@ -162,6 +166,7 @@ export function setAudioDeckBeatSync({
   enabled,
   followerBpm,
   masterBpm,
+  masterPlaybackRate,
   followerBeatGrid,
   masterBeatGrid
 }: {
@@ -170,6 +175,7 @@ export function setAudioDeckBeatSync({
   enabled: boolean;
   followerBpm: number;
   masterBpm: number;
+  masterPlaybackRate: number;
   followerBeatGrid: AudioBeatGridMarker[];
   masterBeatGrid: AudioBeatGridMarker[];
 }) {
@@ -181,6 +187,7 @@ export function setAudioDeckBeatSync({
     enabled,
     followerBpm,
     masterBpm,
+    masterPlaybackRate,
     followerBeatGrid,
     masterBeatGrid
   });

@@ -231,6 +231,7 @@ impl AudioEngine {
         enabled: bool,
         follower_bpm: f64,
         master_bpm: f64,
+        master_playback_rate: f64,
         follower_beat_grid: Vec<AudioBeatGridMarker>,
         master_beat_grid: Vec<AudioBeatGridMarker>,
     ) -> Result<(), String> {
@@ -241,6 +242,7 @@ impl AudioEngine {
             enabled,
             follower_bpm,
             master_bpm,
+            master_playback_rate,
             follower_beat_grid,
             master_beat_grid,
             ack: Some(ack_sender),
@@ -437,6 +439,7 @@ enum AudioCommand {
         enabled: bool,
         follower_bpm: f64,
         master_bpm: f64,
+        master_playback_rate: f64,
         follower_beat_grid: Vec<AudioBeatGridMarker>,
         master_beat_grid: Vec<AudioBeatGridMarker>,
         ack: Option<Sender<Result<(), String>>>,
@@ -604,6 +607,7 @@ impl MixerState {
                 enabled,
                 follower_bpm,
                 master_bpm,
+                master_playback_rate,
                 follower_beat_grid,
                 master_beat_grid,
                 ack,
@@ -614,6 +618,7 @@ impl MixerState {
                     enabled,
                     follower_bpm,
                     master_bpm,
+                    master_playback_rate,
                     follower_beat_grid,
                     master_beat_grid,
                 );
@@ -671,6 +676,7 @@ impl MixerState {
         enabled: bool,
         follower_bpm: f64,
         master_bpm: f64,
+        master_playback_rate: f64,
         follower_beat_grid: Vec<AudioBeatGridMarker>,
         master_beat_grid: Vec<AudioBeatGridMarker>,
     ) {
@@ -679,6 +685,7 @@ impl MixerState {
             return;
         }
 
+        self.decks[master.index()].set_playback_rate(master_playback_rate);
         self.beat_sync = Some(BeatSyncState {
             follower,
             master,
@@ -1133,6 +1140,7 @@ mod tests {
             true,
             110.0,
             120.0,
+            1.1,
             beat_grid(110.0, 16),
             beat_grid(120.0, 16),
         );
@@ -1156,6 +1164,7 @@ mod tests {
             true,
             90.0,
             120.0,
+            1.0,
             beat_grid(90.0, 16),
             beat_grid(120.0, 16),
         );
@@ -1163,5 +1172,26 @@ mod tests {
         let expected_position_sec = (5.0 * (60.0 / 90.0)) + (0.5 * (60.0 / 90.0));
         let actual_position_sec = mixer.decks[DeckId::B.index()].position_seconds();
         assert!((actual_position_sec - expected_position_sec).abs() < 0.001);
+    }
+
+    #[test]
+    fn beat_sync_uses_supplied_master_rate_before_debounced_tempo_command_arrives() {
+        let mut mixer = MixerState::new(1_000);
+        mixer.decks[DeckId::A.index()].load(silent_frames(10_000));
+        mixer.decks[DeckId::B.index()].load(silent_frames(10_000));
+
+        mixer.set_beat_sync(
+            DeckId::B,
+            DeckId::A,
+            true,
+            120.0,
+            120.0,
+            1.03,
+            beat_grid(120.0, 16),
+            beat_grid(120.0, 16),
+        );
+
+        assert!((mixer.decks[DeckId::A.index()].playback_rate() - 1.03).abs() < 0.000_001);
+        assert!((mixer.decks[DeckId::B.index()].playback_rate() - 1.03).abs() < 0.000_001);
     }
 }
