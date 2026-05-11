@@ -4,6 +4,7 @@ import { classNames, ui } from "./common";
 type TopBarProps = {
   mode: "library" | "mix";
   onSearchClick: () => void;
+  onSettingsClick: () => void;
   query: string;
   setMode: (mode: "library" | "mix") => void;
 };
@@ -13,7 +14,7 @@ const modes: Array<{ id: "library" | "mix"; label: string }> = [
   { id: "mix", label: "Mix" }
 ];
 
-export const TopBar = memo(function TopBar({ mode, onSearchClick, query, setMode }: TopBarProps) {
+export const TopBar = memo(function TopBar({ mode, onSearchClick, onSettingsClick, query, setMode }: TopBarProps) {
   return (
     <div className="drag-region grid h-8 grid-cols-[1fr_auto_1fr] items-center border-b border-line bg-gradient-to-b from-[#131418] to-surface-1 px-3">
       <div className="flex items-center gap-3">
@@ -53,7 +54,15 @@ export const TopBar = memo(function TopBar({ mode, onSearchClick, query, setMode
         </button>
       </div>
 
-      <div />
+      <div className="flex justify-end">
+        <button
+          className="no-drag rounded px-2 py-1 font-mono text-[11px] text-text-3 hover:bg-surface-2 hover:text-text-1"
+          onClick={onSettingsClick}
+          type="button"
+        >
+          Settings <span className={ui.kbd}>⌃⇧`</span>
+        </button>
+      </div>
     </div>
   );
 });

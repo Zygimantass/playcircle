@@ -51,6 +51,10 @@ pub enum ControllerAction {
         deck: ControllerDeck,
         pressed: bool,
     },
+    HeadphoneCue {
+        deck: ControllerDeck,
+        enabled: bool,
+    },
     LoadSelected {
         deck: ControllerDeck,
     },
@@ -79,6 +83,12 @@ pub enum ControllerAction {
         value: f32,
     },
     Crossfader {
+        value: f32,
+    },
+    HeadphoneMix {
+        value: f32,
+    },
+    HeadphoneVolume {
         value: f32,
     },
     Eq {
@@ -463,6 +473,10 @@ impl Flx4Mapper {
                 deck,
                 pressed: velocity > 0,
             },
+            0x54 => ControllerAction::HeadphoneCue {
+                deck,
+                enabled: velocity == 0,
+            },
             _ => ControllerAction::Raw,
         }
     }
@@ -563,6 +577,8 @@ impl Flx4Mapper {
                     value: centered,
                 },
                 0x1f => ControllerAction::Crossfader { value: normalized },
+                0x0c => ControllerAction::HeadphoneMix { value: normalized },
+                0x0d => ControllerAction::HeadphoneVolume { value: normalized },
                 _ => ControllerAction::Raw,
             };
         }
@@ -704,6 +720,39 @@ mod tests {
             ControllerAction::Cue {
                 deck: ControllerDeck::B,
                 pressed: false
+            }
+        );
+    }
+
+    #[test]
+    fn flx4_maps_headphone_cue_buttons_and_mix() {
+        let mut mapper = Flx4Mapper::new();
+        assert_eq!(
+            mapper.map(&midi(0x90, 0x54, 0x7f)),
+            ControllerAction::HeadphoneCue {
+                deck: ControllerDeck::A,
+                enabled: false
+            }
+        );
+        assert_eq!(
+            mapper.map(&midi(0x91, 0x54, 0x00)),
+            ControllerAction::HeadphoneCue {
+                deck: ControllerDeck::B,
+                enabled: true
+            }
+        );
+        assert_eq!(mapper.map(&midi(0xb6, 0x2c, 0x7f)), ControllerAction::Raw);
+        assert_eq!(
+            mapper.map(&midi(0xb6, 0x0c, 0x40)),
+            ControllerAction::HeadphoneMix {
+                value: normalize_14_bit(0x40, 0x7f)
+            }
+        );
+        assert_eq!(mapper.map(&midi(0xb6, 0x2d, 0x7f)), ControllerAction::Raw);
+        assert_eq!(
+            mapper.map(&midi(0xb6, 0x0d, 0x20)),
+            ControllerAction::HeadphoneVolume {
+                value: normalize_14_bit(0x20, 0x7f)
             }
         );
     }

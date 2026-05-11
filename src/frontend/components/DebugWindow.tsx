@@ -1,6 +1,6 @@
 import type { ControllerEvent } from "../api/controller";
 import type { ControllerFxDebugState } from "../lib/controllerFx";
-import { formatFxValue, fxDeckChainLabel, fxKindLabel, fxTargetLabel } from "../lib/controllerFx";
+import { formatFxValue, fxDeckChainLabel, fxKindLabel, fxTargetLabel, fxTimingLabel } from "../lib/controllerFx";
 import { classNames } from "./common";
 
 export type DebugTab = "midi";
@@ -75,6 +75,7 @@ export function DebugWindow({
                       <span className={slot.enabled ? "text-green-300" : "text-text-3"}>{slot.enabled ? "ON" : "OFF"}</span>
                     </div>
                     <div className="mt-1 text-text-1">{fxKindLabel(slot.kind)}</div>
+                    <div className="mt-1 text-text-3">timing {fxTimingLabel(slot)}</div>
                     <div className="mt-1 text-text-3">mix {Math.round(slot.mix * 100)}%</div>
                     <div className="text-text-3">amount {formatFxValue(slot.amount)}</div>
                     <div className="text-text-3">rate {formatFxValue(slot.rateHz)}</div>
@@ -132,6 +133,8 @@ function formatControllerActionName(action: ControllerEvent["action"]) {
       return `Deck ${deckLabel(action.deck)} play`;
     case "cue":
       return `Deck ${deckLabel(action.deck)} cue`;
+    case "headphoneCue":
+      return `Deck ${deckLabel(action.deck)} headphone cue`;
     case "loadSelected":
       return `Deck ${deckLabel(action.deck)} load`;
     case "browse":
@@ -150,8 +153,8 @@ function formatControllerActionName(action: ControllerEvent["action"]) {
       return `Deck ${deckLabel(action.deck)} hot cue ${action.index}`;
     case "fxSelect":
       return "FX select";
-    case "fxFocus":
-      return "FX focus";
+    case "fxBeat":
+      return "FX beat";
     case "fxTarget":
       return "FX target";
     case "fxDepth":
@@ -166,6 +169,10 @@ function formatControllerActionName(action: ControllerEvent["action"]) {
       return `Deck ${deckLabel(action.deck)} jog`;
     case "crossfader":
       return "Crossfader";
+    case "headphoneMix":
+      return "Headphone mix";
+    case "headphoneVolume":
+      return "Headphone volume";
     case "raw":
       return "Raw";
   }
@@ -180,13 +187,17 @@ function formatControllerActionPayload(action: ControllerEvent["action"]) {
     case "fxToggle":
     case "fxClear":
       return action.pressed ? "pressed" : "released";
+    case "headphoneCue":
+      return action.enabled ? "on" : "off";
     case "fxSelect":
-    case "fxFocus":
+    case "fxBeat":
       return `${action.direction > 0 ? "+" : ""}${action.direction}${action.pressed ? " pressed" : " released"}`;
     case "tempo":
     case "volume":
     case "filter":
     case "crossfader":
+    case "headphoneMix":
+    case "headphoneVolume":
     case "fxDepth":
       return action.value.toFixed(4);
     case "fxTarget":

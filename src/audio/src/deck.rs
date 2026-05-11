@@ -316,6 +316,14 @@ impl Deck {
         self.playback_rate = (1.0 + tempo_percent.clamp(-100.0, 100.0) as f64 / 100.0).max(0.05);
     }
 
+    pub fn set_playback_rate(&mut self, playback_rate: f64) {
+        self.playback_rate = playback_rate.clamp(0.05, 4.0);
+    }
+
+    pub fn playback_rate(&self) -> f64 {
+        self.playback_rate
+    }
+
     pub fn set_filter_cutoff(&mut self, cutoff_hz: f32) {
         self.filter.set_low_pass_cutoff(cutoff_hz);
     }
@@ -350,6 +358,30 @@ impl Deck {
             return 0.0;
         }
         (self.played_frames / seekable_frames as f64).clamp(0.0, 1.0) as f32
+    }
+
+    pub fn position_frames(&self) -> f64 {
+        self.played_frames
+    }
+
+    pub fn set_position_frames(&mut self, frames: f64) {
+        let max_playable_frame = self.seekable_frames().saturating_sub(1) as f64;
+        self.played_frames = frames.clamp(0.0, max_playable_frame);
+        self.filter.clear();
+        self.eq.clear();
+        self.fx.clear();
+    }
+
+    pub fn total_seconds(&self) -> f64 {
+        self.seekable_frames() as f64 / self.sample_rate.max(1.0)
+    }
+
+    pub fn position_seconds(&self) -> f64 {
+        self.position_frames() / self.sample_rate.max(1.0)
+    }
+
+    pub fn sample_rate(&self) -> f64 {
+        self.sample_rate.max(1.0)
     }
 
     pub fn cue_enabled(&self) -> bool {
@@ -452,6 +484,12 @@ pub enum DeckFxKind {
     Reverb,
     Crush,
     Flanger,
+    Spiral,
+    Delay,
+    Trans,
+    Phaser,
+    Roll,
+    SlipRoll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -573,6 +611,12 @@ enum DeckEffect {
     Reverb(ReverbEffect),
     Crush(CrushEffect),
     Flanger(FlangerEffect),
+    Spiral(SpiralEffect),
+    Delay(DelayEffect),
+    Trans(TransEffect),
+    Phaser(PhaserEffect),
+    Roll(RollEffect),
+    SlipRoll(RollEffect),
 }
 
 impl DeckEffect {
@@ -582,6 +626,12 @@ impl DeckEffect {
             DeckFxKind::Reverb => Self::Reverb(ReverbEffect::new(sample_rate, config)),
             DeckFxKind::Crush => Self::Crush(CrushEffect::new(config)),
             DeckFxKind::Flanger => Self::Flanger(FlangerEffect::new(sample_rate, config)),
+            DeckFxKind::Spiral => Self::Spiral(SpiralEffect::new(sample_rate, config)),
+            DeckFxKind::Delay => Self::Delay(DelayEffect::new(sample_rate, config)),
+            DeckFxKind::Trans => Self::Trans(TransEffect::new(sample_rate, config)),
+            DeckFxKind::Phaser => Self::Phaser(PhaserEffect::new(sample_rate, config)),
+            DeckFxKind::Roll => Self::Roll(RollEffect::new(sample_rate, config)),
+            DeckFxKind::SlipRoll => Self::SlipRoll(RollEffect::new(sample_rate, config)),
         }
     }
 
@@ -591,6 +641,12 @@ impl DeckEffect {
             Self::Reverb(effect) => effect.set_sample_rate(sample_rate),
             Self::Crush(_) => {}
             Self::Flanger(effect) => effect.set_sample_rate(sample_rate),
+            Self::Spiral(effect) => effect.set_sample_rate(sample_rate),
+            Self::Delay(effect) => effect.set_sample_rate(sample_rate),
+            Self::Trans(effect) => effect.set_sample_rate(sample_rate),
+            Self::Phaser(effect) => effect.set_sample_rate(sample_rate),
+            Self::Roll(effect) => effect.set_sample_rate(sample_rate),
+            Self::SlipRoll(effect) => effect.set_sample_rate(sample_rate),
         }
     }
 
@@ -600,6 +656,12 @@ impl DeckEffect {
             Self::Reverb(_) => DeckFxKind::Reverb,
             Self::Crush(_) => DeckFxKind::Crush,
             Self::Flanger(_) => DeckFxKind::Flanger,
+            Self::Spiral(_) => DeckFxKind::Spiral,
+            Self::Delay(_) => DeckFxKind::Delay,
+            Self::Trans(_) => DeckFxKind::Trans,
+            Self::Phaser(_) => DeckFxKind::Phaser,
+            Self::Roll(_) => DeckFxKind::Roll,
+            Self::SlipRoll(_) => DeckFxKind::SlipRoll,
         }
     }
 
@@ -609,6 +671,12 @@ impl DeckEffect {
             Self::Reverb(effect) => effect.set_config(config),
             Self::Crush(effect) => effect.set_config(config),
             Self::Flanger(effect) => effect.set_config(config),
+            Self::Spiral(effect) => effect.set_config(config),
+            Self::Delay(effect) => effect.set_config(config),
+            Self::Trans(effect) => effect.set_config(config),
+            Self::Phaser(effect) => effect.set_config(config),
+            Self::Roll(effect) => effect.set_config(config),
+            Self::SlipRoll(effect) => effect.set_config(config),
         }
     }
 
@@ -618,6 +686,12 @@ impl DeckEffect {
             Self::Reverb(effect) => effect.clear(),
             Self::Crush(effect) => effect.clear(),
             Self::Flanger(effect) => effect.clear(),
+            Self::Spiral(effect) => effect.clear(),
+            Self::Delay(effect) => effect.clear(),
+            Self::Trans(effect) => effect.clear(),
+            Self::Phaser(effect) => effect.clear(),
+            Self::Roll(effect) => effect.clear(),
+            Self::SlipRoll(effect) => effect.clear(),
         }
     }
 
@@ -627,6 +701,12 @@ impl DeckEffect {
             Self::Reverb(effect) => effect.process(sample),
             Self::Crush(effect) => effect.process(sample),
             Self::Flanger(effect) => effect.process(sample),
+            Self::Spiral(effect) => effect.process(sample),
+            Self::Delay(effect) => effect.process(sample),
+            Self::Trans(effect) => effect.process(sample),
+            Self::Phaser(effect) => effect.process(sample),
+            Self::Roll(effect) => effect.process(sample),
+            Self::SlipRoll(effect) => effect.process(sample),
         }
     }
 }
@@ -894,6 +974,301 @@ impl FlangerEffect {
 }
 
 #[derive(Debug)]
+struct DelayEffect {
+    config: DeckFxConfig,
+    sample_rate: f32,
+    buffer: Vec<[f32; 2]>,
+    index: usize,
+    hpf_low: OnePoleLowPass,
+}
+
+impl DelayEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        let mut effect = Self {
+            config,
+            sample_rate: sample_rate.max(1.0),
+            buffer: Vec::new(),
+            index: 0,
+            hpf_low: OnePoleLowPass::new(sample_rate),
+        };
+        effect.resize_buffer();
+        effect
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+        self.hpf_low.set_sample_rate(self.sample_rate);
+        self.resize_buffer();
+    }
+
+    fn set_config(&mut self, config: DeckFxConfig) {
+        let old_len = self.buffer.len();
+        self.config = config;
+        let next_len = delay_len(self.sample_rate, self.config.amount);
+        if next_len.abs_diff(old_len) > 2 {
+            self.resize_buffer();
+        }
+    }
+
+    fn resize_buffer(&mut self) {
+        self.buffer = vec![[0.0, 0.0]; delay_len(self.sample_rate, self.config.amount)];
+        self.index = 0;
+    }
+
+    fn clear(&mut self) {
+        self.buffer.fill([0.0, 0.0]);
+        self.hpf_low.clear();
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled || self.buffer.is_empty() {
+            return sample;
+        }
+        let delayed = self.buffer[self.index];
+        self.hpf_low
+            .set_cutoff_immediate(map_fx_hpf_cutoff(self.config.rate_hz));
+        let delayed = high_pass(&mut self.hpf_low, delayed);
+        let feedback = self.config.feedback.clamp(0.0, 0.65);
+        self.buffer[self.index] = [
+            sample[0] + delayed[0] * feedback,
+            sample[1] + delayed[1] * feedback,
+        ];
+        self.index = (self.index + 1) % self.buffer.len();
+        wet_mix(sample, delayed, self.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct SpiralEffect {
+    delay: DelayEffect,
+    phase: f32,
+}
+
+impl SpiralEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        Self {
+            delay: DelayEffect::new(sample_rate, config),
+            phase: 0.0,
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.delay.set_sample_rate(sample_rate);
+    }
+
+    fn set_config(&mut self, config: DeckFxConfig) {
+        self.delay.set_config(config);
+    }
+
+    fn clear(&mut self) {
+        self.delay.clear();
+        self.phase = 0.0;
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.delay.config.enabled || self.delay.buffer.is_empty() {
+            return sample;
+        }
+        let delayed = self.delay.buffer[self.delay.index];
+        let tone = (self.phase * std::f32::consts::TAU).sin() * 0.08;
+        let cross = [
+            delayed[0] * (1.0 - tone.abs()) - delayed[1] * tone,
+            delayed[1] * (1.0 - tone.abs()) + delayed[0] * tone,
+        ];
+        self.delay
+            .hpf_low
+            .set_cutoff_immediate(map_fx_hpf_cutoff(self.delay.config.rate_hz));
+        let wet = high_pass(&mut self.delay.hpf_low, cross);
+        let feedback =
+            (0.35 + self.delay.config.feedback + self.delay.config.mix * 0.25).clamp(0.0, 0.92);
+        self.delay.buffer[self.delay.index] =
+            [sample[0] + wet[0] * feedback, sample[1] + wet[1] * feedback];
+        self.delay.index = (self.delay.index + 1) % self.delay.buffer.len();
+        self.phase = (self.phase + 0.0007) % 1.0;
+        wet_mix(sample, wet, self.delay.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct TransEffect {
+    config: DeckFxConfig,
+    sample_rate: f32,
+    phase: f32,
+}
+
+impl TransEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        Self {
+            config,
+            sample_rate: sample_rate.max(1.0),
+            phase: 0.0,
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+    }
+
+    fn set_config(&mut self, config: DeckFxConfig) {
+        self.config = config;
+    }
+
+    fn clear(&mut self) {
+        self.phase = 0.0;
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled {
+            return sample;
+        }
+        let rate = self.config.rate_hz.clamp(0.05, 64.0);
+        let width = (0.15 + self.config.amount.clamp(0.0, 1.0) * 0.7).clamp(0.05, 0.95);
+        let gate = if self.phase < width { 1.0 } else { 0.0 };
+        let shaped = [sample[0] * gate, sample[1] * gate];
+        self.phase = (self.phase + rate / self.sample_rate) % 1.0;
+        wet_mix(sample, shaped, self.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct PhaserEffect {
+    config: DeckFxConfig,
+    sample_rate: f32,
+    phase: f32,
+    stages_l: [AllPassStage; 4],
+    stages_r: [AllPassStage; 4],
+    feedback_l: f32,
+    feedback_r: f32,
+}
+
+impl PhaserEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        Self {
+            config,
+            sample_rate: sample_rate.max(1.0),
+            phase: 0.0,
+            stages_l: [AllPassStage::new(); 4],
+            stages_r: [AllPassStage::new(); 4],
+            feedback_l: 0.0,
+            feedback_r: 0.0,
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+    }
+
+    fn set_config(&mut self, config: DeckFxConfig) {
+        self.config = config;
+    }
+
+    fn clear(&mut self) {
+        self.phase = 0.0;
+        self.stages_l = [AllPassStage::new(); 4];
+        self.stages_r = [AllPassStage::new(); 4];
+        self.feedback_l = 0.0;
+        self.feedback_r = 0.0;
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled {
+            return sample;
+        }
+        let rate = self.config.rate_hz.clamp(0.02, 8.0);
+        let depth = self.config.amount.clamp(0.0, 1.0);
+        let lfo_l = (self.phase * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+        let lfo_r = ((self.phase + 0.25) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+        let coeff_l = 0.2 + lfo_l * depth * 0.72;
+        let coeff_r = 0.2 + lfo_r * depth * 0.72;
+        let feedback = self.config.feedback.clamp(0.0, 0.85);
+        let mut left = sample[0] + self.feedback_l * feedback;
+        let mut right = sample[1] + self.feedback_r * feedback;
+        for stage in &mut self.stages_l {
+            left = stage.process(left, coeff_l);
+        }
+        for stage in &mut self.stages_r {
+            right = stage.process(right, coeff_r);
+        }
+        self.feedback_l = left;
+        self.feedback_r = right;
+        self.phase = (self.phase + rate / self.sample_rate) % 1.0;
+        wet_mix(sample, [left, right], self.config.mix)
+    }
+}
+
+#[derive(Debug)]
+struct RollEffect {
+    config: DeckFxConfig,
+    sample_rate: f32,
+    buffer: Vec<[f32; 2]>,
+    write_index: usize,
+    read_index: usize,
+    filled: bool,
+}
+
+impl RollEffect {
+    fn new(sample_rate: f32, config: DeckFxConfig) -> Self {
+        let mut effect = Self {
+            config,
+            sample_rate: sample_rate.max(1.0),
+            buffer: Vec::new(),
+            write_index: 0,
+            read_index: 0,
+            filled: false,
+        };
+        effect.resize_buffer();
+        effect
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+        self.resize_buffer();
+    }
+
+    fn set_config(&mut self, config: DeckFxConfig) {
+        let old_len = self.buffer.len();
+        self.config = config;
+        let next_len = delay_len(self.sample_rate, self.config.amount);
+        if next_len.abs_diff(old_len) > 2 {
+            self.resize_buffer();
+        }
+    }
+
+    fn resize_buffer(&mut self) {
+        self.buffer = vec![[0.0, 0.0]; delay_len(self.sample_rate, self.config.amount)];
+        self.write_index = 0;
+        self.read_index = 0;
+        self.filled = false;
+    }
+
+    fn clear(&mut self) {
+        self.buffer.fill([0.0, 0.0]);
+        self.write_index = 0;
+        self.read_index = 0;
+        self.filled = false;
+    }
+
+    fn process(&mut self, sample: [f32; 2]) -> [f32; 2] {
+        if !self.config.enabled || self.buffer.is_empty() {
+            return sample;
+        }
+        if !self.filled {
+            self.buffer[self.write_index] = sample;
+            self.write_index += 1;
+            if self.write_index >= self.buffer.len() {
+                self.write_index = 0;
+                self.read_index = 0;
+                self.filled = true;
+            }
+            return sample;
+        }
+        let rolled = self.buffer[self.read_index];
+        self.read_index = (self.read_index + 1) % self.buffer.len();
+        wet_mix(sample, rolled, self.config.mix)
+    }
+}
+
+#[derive(Debug)]
 struct CombFilter {
     delay: DelayLine,
     last: [f32; 2],
@@ -930,6 +1305,26 @@ impl CombFilter {
 struct DelayLine {
     buffer: Vec<[f32; 2]>,
     index: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AllPassStage {
+    x1: f32,
+    y1: f32,
+}
+
+impl AllPassStage {
+    const fn new() -> Self {
+        Self { x1: 0.0, y1: 0.0 }
+    }
+
+    fn process(&mut self, input: f32, coefficient: f32) -> f32 {
+        let coefficient = coefficient.clamp(0.0, 0.98);
+        let output = -coefficient * input + self.x1 + coefficient * self.y1;
+        self.x1 = input;
+        self.y1 = output;
+        output
+    }
 }
 
 impl DelayLine {
@@ -972,6 +1367,13 @@ fn map_fx_hpf_cutoff(amount: f32) -> f32 {
     let min = 40.0_f32;
     let max = 2_000.0_f32;
     min * (max / min).powf(amount)
+}
+
+fn delay_len(sample_rate: f32, delay_ms: f32) -> usize {
+    let delay_ms = delay_ms.clamp(5.0, 4_000.0);
+    ((sample_rate.max(1.0) * delay_ms) / 1_000.0)
+        .round()
+        .max(1.0) as usize
 }
 
 fn wet_mix(dry: [f32; 2], wet: [f32; 2], mix: f32) -> [f32; 2] {

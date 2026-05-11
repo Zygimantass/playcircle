@@ -1,6 +1,8 @@
 import { useDroppable } from "@dnd-kit/core";
-import { memo, useRef, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
+import { memo, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 import type { Track } from "../designTypes";
+import type { DeckFxKind } from "../api/audio";
+import { CONTROLLER_FX_KINDS, fxKindLabel, fxTimingLabel, type ControllerFxDebugState } from "../lib/controllerFx";
 import { classNames, DEFAULT_BEAT_WAVEFORM_BEATS, Waveform, waveformClickPosition } from "./common";
 
 type DeckId = "A" | "B";
@@ -23,6 +25,7 @@ type DeckState = {
   eq: DeckEq;
   filterAmount: number;
   cuePoint: number;
+  cueEnabled: boolean;
 };
 
 type WaveformDragState = {
@@ -43,13 +46,21 @@ type PlayerDockProps = {
   deckA: DeckState;
   deckB: DeckState;
   crossfader: number;
+  headphoneMix: number;
+  headphoneVolume: number;
+  fxState: ControllerFxDebugState;
   trackDragActive: boolean;
   onBeatSync: (deck: DeckId) => void;
   onCycleTempoRange: (deck: DeckId) => void;
   onSetCrossfader: (value: number) => void;
   onCueAction: (deck: DeckId) => void;
+  onSetCue: (deck: DeckId, enabled: boolean) => void;
   onSetEq: (deck: DeckId, band: EqBand, value: number) => void;
   onSetFilter: (deck: DeckId, amount: number) => void;
+  onSetHeadphoneMix: (value: number) => void;
+  onSetHeadphoneVolume: (value: number) => void;
+  onSetFxActive: (enabled: boolean) => void;
+  onSetFxKind: (kind: DeckFxKind) => void;
   onSetPlaying: (deck: DeckId, playing: boolean) => void;
   onSetPosition: (deck: DeckId, position: number) => void;
   onSetTempo: (deck: DeckId, tempoPercent: number) => void;
@@ -64,13 +75,21 @@ export const PlayerDock = memo(function PlayerDock({
   deckA,
   deckB,
   crossfader,
+  headphoneMix,
+  headphoneVolume,
+  fxState,
   trackDragActive,
   onBeatSync,
   onCycleTempoRange,
   onSetCrossfader,
   onCueAction,
+  onSetCue,
   onSetEq,
   onSetFilter,
+  onSetHeadphoneMix,
+  onSetHeadphoneVolume,
+  onSetFxActive,
+  onSetFxKind,
   onSetPlaying,
   onSetPosition,
   onSetTempo,
@@ -110,10 +129,18 @@ export const PlayerDock = memo(function PlayerDock({
           deckA={deckA}
           deckB={deckB}
           crossfader={crossfader}
+          fxState={fxState}
+          headphoneMix={headphoneMix}
+          headphoneVolume={headphoneVolume}
           trackDragActive={trackDragActive}
+          onSetCue={onSetCue}
           onSetEq={onSetEq}
           onSetFilter={onSetFilter}
           onSetCrossfader={onSetCrossfader}
+          onSetFxActive={onSetFxActive}
+          onSetFxKind={onSetFxKind}
+          onSetHeadphoneMix={onSetHeadphoneMix}
+          onSetHeadphoneVolume={onSetHeadphoneVolume}
           onSetVolume={onSetVolume}
         />
         <DeckControls
@@ -527,44 +554,143 @@ function MixerCenter({
   deckA,
   deckB,
   crossfader,
+  fxState,
+  headphoneMix,
+  headphoneVolume,
   trackDragActive,
+  onSetCue,
   onSetCrossfader,
   onSetEq,
   onSetFilter,
+  onSetFxActive,
+  onSetFxKind,
+  onSetHeadphoneMix,
+  onSetHeadphoneVolume,
   onSetVolume
 }: {
   deckA: DeckState;
   deckB: DeckState;
   crossfader: number;
+  fxState: ControllerFxDebugState;
+  headphoneMix: number;
+  headphoneVolume: number;
   trackDragActive: boolean;
+  onSetCue: (deck: DeckId, enabled: boolean) => void;
   onSetCrossfader: (value: number) => void;
   onSetEq: (deck: DeckId, band: EqBand, value: number) => void;
   onSetFilter: (deck: DeckId, amount: number) => void;
+  onSetFxActive: (enabled: boolean) => void;
+  onSetFxKind: (kind: DeckFxKind) => void;
+  onSetHeadphoneMix: (value: number) => void;
+  onSetHeadphoneVolume: (value: number) => void;
   onSetVolume: (deck: DeckId, volume: number) => void;
 }) {
+  const focusedFx = fxState.slots[fxState.focusIndex] ?? fxState.slots[0];
+  const [fxMenuOpen, setFxMenuOpen] = useState(false);
+  const fxMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!fxMenuOpen) return undefined;
+    const onPointerDown = (event: globalThis.PointerEvent) => {
+      if (fxMenuRef.current?.contains(event.target as Node)) return;
+      setFxMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => window.removeEventListener("pointerdown", onPointerDown);
+  }, [fxMenuOpen]);
+
   return (
-    <div className={classNames("grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_34px] border-x border-line bg-surface-1", trackDragActive && "pointer-events-none")}>
+    <div className={classNames("grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_42px_58px_34px] border-x border-line bg-surface-1", trackDragActive && "pointer-events-none")}>
       <div className="grid min-h-0 grid-cols-2 gap-2 px-3 py-2">
         <MixerDeckStrip
           deck="A"
+          cueEnabled={deckA.cueEnabled}
           eq={deckA.eq}
           meterDb={deckA.levelDb}
           filterAmount={deckA.filterAmount}
           volume={deckA.volume}
+          onSetCue={onSetCue}
           onSetEq={onSetEq}
           onSetFilter={onSetFilter}
           onSetVolume={onSetVolume}
         />
         <MixerDeckStrip
           deck="B"
+          cueEnabled={deckB.cueEnabled}
           eq={deckB.eq}
           meterDb={deckB.levelDb}
           filterAmount={deckB.filterAmount}
           volume={deckB.volume}
+          onSetCue={onSetCue}
           onSetEq={onSetEq}
           onSetFilter={onSetFilter}
           onSetVolume={onSetVolume}
         />
+      </div>
+      <div className="grid grid-cols-2 items-center gap-3 border-t border-line px-3 py-1.5 font-mono text-[9px] text-text-2">
+        <label className="grid min-w-0 grid-cols-[34px_minmax(0,1fr)] items-center gap-2">
+          <span>MIX</span>
+          <input aria-label="Headphone mix" className="accent-[var(--color-accent)]" max="1" min="0" onChange={(event) => onSetHeadphoneMix(Number(event.currentTarget.value))} step="0.01" type="range" value={headphoneMix} />
+        </label>
+        <label className="grid min-w-0 grid-cols-[44px_minmax(0,1fr)] items-center gap-2">
+          <span>PHONES</span>
+          <input aria-label="Headphone volume" className="accent-[var(--color-accent)]" max="1" min="0" onChange={(event) => onSetHeadphoneVolume(Number(event.currentTarget.value))} step="0.01" type="range" value={headphoneVolume} />
+        </label>
+      </div>
+      <div className="grid gap-1 border-t border-line px-3 py-1.5 font-mono text-[9px] text-text-2">
+        <div className="grid min-w-0 grid-cols-[36px_minmax(0,1fr)_44px] items-center gap-2">
+          <span>FX</span>
+          <div ref={fxMenuRef} className="relative min-w-0">
+            <button
+              aria-expanded={fxMenuOpen}
+              aria-haspopup="listbox"
+              className="grid h-6 w-full grid-cols-[minmax(0,1fr)_14px] items-center rounded-sm border border-line bg-surface-2 px-2 text-left text-[10px] text-text-1 hover:bg-surface-3"
+              onClick={() => setFxMenuOpen((open) => !open)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setFxMenuOpen(false);
+                if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setFxMenuOpen(true);
+                }
+              }}
+              type="button"
+            >
+              <span className="truncate">{fxKindLabel(focusedFx.kind)}</span>
+              <span className="text-right text-text-3">▾</span>
+            </button>
+            {fxMenuOpen && (
+              <div className="absolute bottom-[calc(100%+4px)] left-0 z-20 grid max-h-[220px] w-[180px] overflow-auto rounded-sm border border-line-2 bg-[#0b0c10] p-1 shadow-[0_12px_36px_rgba(0,0,0,0.5)]" role="listbox">
+                {CONTROLLER_FX_KINDS.map((kind) => (
+                  <button
+                    key={kind}
+                    className={classNames(
+                      "grid h-7 grid-cols-[minmax(0,1fr)_16px] items-center rounded-sm px-2 text-left text-[10px]",
+                      kind === focusedFx.kind ? "bg-accent/15 text-text-1" : "text-text-2 hover:bg-surface-2 hover:text-text-1"
+                    )}
+                    onClick={() => {
+                      onSetFxKind(kind);
+                      setFxMenuOpen(false);
+                    }}
+                    role="option"
+                    type="button"
+                    aria-selected={kind === focusedFx.kind}
+                  >
+                    <span className="truncate">{fxKindLabel(kind)}</span>
+                    <span className="text-right text-accent">{kind === focusedFx.kind ? "✓" : ""}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <label className="flex items-center justify-end gap-1 text-text-2">
+            <input checked={focusedFx.enabled} className="accent-[var(--color-accent)]" onChange={(event) => onSetFxActive(event.currentTarget.checked)} type="checkbox" />
+            ON
+          </label>
+        </div>
+        <div className="grid min-w-0 grid-cols-[36px_minmax(0,1fr)] items-center gap-2">
+          <span>MIX</span>
+          <span className="min-w-0 truncate text-right text-text-1">{Math.round(focusedFx.mix * 100)}% · {fxTimingLabel(focusedFx)}</span>
+        </div>
       </div>
       <div className="grid min-h-0 border-t border-line px-3 py-1.5">
         <label className="grid min-w-0 grid-cols-[28px_minmax(0,1fr)_28px] items-center gap-2 font-mono text-[9px] text-text-2">
@@ -588,19 +714,23 @@ function MixerCenter({
 
 function MixerDeckStrip({
   deck,
+  cueEnabled,
   eq,
   meterDb,
   filterAmount,
   volume,
+  onSetCue,
   onSetEq,
   onSetFilter,
   onSetVolume
 }: {
   deck: DeckId;
+  cueEnabled: boolean;
   eq: { high: number; mid: number; low: number };
   meterDb: number;
   filterAmount: number;
   volume: number;
+  onSetCue: (deck: DeckId, enabled: boolean) => void;
   onSetEq: (deck: DeckId, band: EqBand, value: number) => void;
   onSetFilter: (deck: DeckId, amount: number) => void;
   onSetVolume: (deck: DeckId, volume: number) => void;
@@ -615,10 +745,20 @@ function MixerDeckStrip({
   );
   const meter = <Meter label="" levelDb={meterDb} />;
   const fader = (
-    <label className="grid min-h-0 grid-rows-[1fr_14px] gap-1 font-mono text-[9px] text-text-2">
+    <div className="grid min-h-0 grid-rows-[1fr_14px_22px] gap-1 font-mono text-[9px] text-text-2">
       <VolumeFader deck={deck} value={volume} onChange={(value) => onSetVolume(deck, value)} />
       <span className="text-center">{Math.round(volume * 100)}</span>
-    </label>
+      <button
+        className={classNames(
+          "rounded-sm border px-1 text-[9px] leading-tight",
+          cueEnabled ? "border-accent bg-accent/15 text-accent" : "border-line-2 bg-surface-2 text-text-2 hover:bg-surface-3 hover:text-text-1"
+        )}
+        onClick={() => onSetCue(deck, !cueEnabled)}
+        type="button"
+      >
+        CUE
+      </button>
+    </div>
   );
   const level = (
     <div className={classNames("grid min-h-0 gap-2", deck === "A" ? "grid-cols-[18px_32px]" : "grid-cols-[32px_18px]")}>

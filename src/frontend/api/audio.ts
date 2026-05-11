@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type DeckId = "A" | "B";
-export type DeckFxKind = "echo" | "reverb" | "crush" | "flanger";
+export type DeckFxKind = "echo" | "reverb" | "crush" | "flanger" | "spiral" | "delay" | "trans" | "phaser" | "roll" | "slipRoll";
 export type DeckFxConfig = {
   kind: DeckFxKind;
   enabled: boolean;
@@ -9,6 +9,26 @@ export type DeckFxConfig = {
   amount: number;
   rateHz: number;
   feedback: number;
+};
+
+export type AudioBeatGridMarker = {
+  timeSeconds: number;
+  beatNumber: number;
+};
+
+export type AudioOutputDevice = {
+  id: string;
+  name: string;
+  channels: number;
+  sampleRate: number;
+  cueSupported: boolean;
+  selected: boolean;
+  masterSelected: boolean;
+};
+
+export type AudioOutputRouting = {
+  masterStart: number;
+  headphoneStart: number;
 };
 
 const fixtureState: Record<DeckId, { position: number; tempoPercent: number }> = {
@@ -29,6 +49,36 @@ export function loadAudioWaveform(path: string, bins = 512) {
   if (usesBrowserAudioFixture()) return Promise.resolve<Array<[number, number]>>([]);
 
   return invoke<Array<[number, number]>>("load_audio_waveform", { path, bins });
+}
+
+export function listAudioOutputs() {
+  if (usesBrowserAudioFixture()) {
+    return Promise.resolve<AudioOutputDevice[]>([
+      {
+        id: "fixture",
+        name: "Browser fixture output",
+        channels: 2,
+        sampleRate: 44_100,
+        cueSupported: false,
+        selected: true,
+        masterSelected: false
+      }
+    ]);
+  }
+
+  return invoke<AudioOutputDevice[]>("list_audio_outputs");
+}
+
+export function setAudioOutputDevice(id: string) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("set_audio_output_device", { id });
+}
+
+export function setAudioMasterOutputDevice(id: string | null) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("set_audio_master_output_device", { id });
 }
 
 export function playAudioDeck(deck: DeckId) {
@@ -106,6 +156,36 @@ export function setAudioDeckTempo(deck: DeckId, tempoPercent: number) {
   return invoke<void>("set_audio_deck_tempo", { deck, tempoPercent });
 }
 
+export function setAudioDeckBeatSync({
+  follower,
+  master,
+  enabled,
+  followerBpm,
+  masterBpm,
+  followerBeatGrid,
+  masterBeatGrid
+}: {
+  follower: DeckId;
+  master: DeckId;
+  enabled: boolean;
+  followerBpm: number;
+  masterBpm: number;
+  followerBeatGrid: AudioBeatGridMarker[];
+  masterBeatGrid: AudioBeatGridMarker[];
+}) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("set_audio_deck_beat_sync", {
+    follower,
+    master,
+    enabled,
+    followerBpm,
+    masterBpm,
+    followerBeatGrid,
+    masterBeatGrid
+  });
+}
+
 export function setAudioDeckFilter(deck: DeckId, cutoffHz: number) {
   if (usesBrowserAudioFixture()) return Promise.resolve();
 
@@ -146,6 +226,24 @@ export function setAudioMasterVolume(volume: number) {
   if (usesBrowserAudioFixture()) return Promise.resolve();
 
   return invoke<void>("set_audio_master_volume", { volume });
+}
+
+export function setAudioHeadphoneVolume(volume: number) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("set_audio_headphone_volume", { volume });
+}
+
+export function setAudioHeadphoneMix(mix: number) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("set_audio_headphone_mix", { mix });
+}
+
+export function setAudioOutputRouting(masterStart: number, headphoneStart: number) {
+  if (usesBrowserAudioFixture()) return Promise.resolve();
+
+  return invoke<void>("set_audio_output_routing", { masterStart, headphoneStart });
 }
 
 export function usesBrowserAudioFixture() {

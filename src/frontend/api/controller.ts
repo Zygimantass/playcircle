@@ -24,6 +24,7 @@ export type ControllerAction =
   | { type: "raw" }
   | { type: "playPause"; deck: ControllerDeck; pressed: boolean }
   | { type: "cue"; deck: ControllerDeck; pressed: boolean }
+  | { type: "headphoneCue"; deck: ControllerDeck; enabled: boolean }
   | { type: "loadSelected"; deck: ControllerDeck }
   | { type: "browse"; ticks: number; shifted: boolean }
   | { type: "browsePress"; shifted: boolean; pressed: boolean }
@@ -32,6 +33,8 @@ export type ControllerAction =
   | { type: "tempo"; deck: ControllerDeck; value: number }
   | { type: "volume"; deck: ControllerDeck; value: number }
   | { type: "crossfader"; value: number }
+  | { type: "headphoneMix"; value: number }
+  | { type: "headphoneVolume"; value: number }
   | { type: "eq"; deck: ControllerDeck; band: EqBand; value: number }
   | { type: "filter"; deck: ControllerDeck; value: number }
   | { type: "hotCue"; deck: ControllerDeck; index: number; pressed: boolean }

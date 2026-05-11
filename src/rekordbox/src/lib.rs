@@ -134,7 +134,11 @@ impl RekordboxDatabase {
         )
     }
 
-    fn open_with_key_and_flags(path: impl AsRef<Path>, key: &str, flags: OpenFlags) -> Result<Self> {
+    fn open_with_key_and_flags(
+        path: impl AsRef<Path>,
+        key: &str,
+        flags: OpenFlags,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let connection = Connection::open_with_flags(path, flags)?;
 
@@ -578,7 +582,10 @@ impl RekordboxDatabase {
             )));
         }
 
-        if playlist_descendants(&transaction, playlist_id)?.iter().any(|id| id == folder_id) {
+        if playlist_descendants(&transaction, playlist_id)?
+            .iter()
+            .any(|id| id == folder_id)
+        {
             return Err(RekordboxError::Validation(
                 "cannot move a playlist under one of its descendants".to_string(),
             ));
@@ -680,9 +687,7 @@ fn playlist_descendants(connection: &Connection, playlist_id: &str) -> Result<Ve
     }
 
     let mut descendants = Vec::new();
-    let mut stack = children_by_parent
-        .remove(playlist_id)
-        .unwrap_or_default();
+    let mut stack = children_by_parent.remove(playlist_id).unwrap_or_default();
     while let Some(id) = stack.pop() {
         if let Some(children) = children_by_parent.remove(&id) {
             stack.extend(children);
@@ -860,7 +865,10 @@ mod tests {
         if let Ok(entries) = fs::read_dir(parent) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
-                if name.to_str().is_some_and(|value| value.starts_with(&backup_prefix)) {
+                if name
+                    .to_str()
+                    .is_some_and(|value| value.starts_with(&backup_prefix))
+                {
                     let _ = fs::remove_file(entry.path());
                 }
             }

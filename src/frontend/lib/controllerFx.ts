@@ -12,7 +12,7 @@ export type ControllerFxState = {
 };
 export type ControllerFxDebugState = ControllerFxState;
 
-export const CONTROLLER_FX_KINDS: DeckFxKind[] = ["echo", "reverb", "crush", "flanger"];
+export const CONTROLLER_FX_KINDS: DeckFxKind[] = ["echo", "reverb", "crush", "flanger", "spiral", "delay", "trans", "phaser", "roll", "slipRoll"];
 export const CONTROLLER_FX_BEATS = [1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2, 3 / 4, 1, 2, 4, 8, 16];
 const CONTROLLER_REVERB_AMOUNTS = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1];
 const FALLBACK_FX_BPM = 120;
@@ -43,6 +43,20 @@ export function defaultControllerFxSlot(kind: DeckFxKind): ControllerFxSlot {
       return { kind, enabled: false, mix: 0.35, amount: 0.45, rateHz: 0.45, feedback: 0, beatFraction: 1 / 2 };
     case "flanger":
       return { kind, enabled: false, mix: 0.35, amount: 0.6, rateHz: beatFractionToHz(1 / 2, FALLBACK_FX_BPM), feedback: 0.25, beatFraction: 1 / 2 };
+    case "spiral":
+      return { kind, enabled: false, mix: 0.34, amount: beatFractionToMs(1 / 2, FALLBACK_FX_BPM), rateHz: 0.35, feedback: 0.45, beatFraction: 1 / 2 };
+    case "delay":
+      return { kind, enabled: false, mix: 0.35, amount: beatFractionToMs(1 / 2, FALLBACK_FX_BPM), rateHz: 0.25, feedback: 0.18, beatFraction: 1 / 2 };
+    case "trans":
+      return { kind, enabled: false, mix: 1, amount: 0.5, rateHz: beatFractionToHz(1 / 4, FALLBACK_FX_BPM), feedback: 0, beatFraction: 1 / 4 };
+    case "phaser":
+      return { kind, enabled: false, mix: 0.45, amount: 0.7, rateHz: beatFractionToHz(1, FALLBACK_FX_BPM), feedback: 0.35, beatFraction: 1 };
+    case "roll":
+      return { kind, enabled: false, mix: 1, amount: beatFractionToMs(1 / 2, FALLBACK_FX_BPM), rateHz: 0, feedback: 0, beatFraction: 1 / 2 };
+    case "slipRoll":
+      return { kind, enabled: false, mix: 1, amount: beatFractionToMs(1 / 2, FALLBACK_FX_BPM), rateHz: 0, feedback: 0, beatFraction: 1 / 2 };
+    default:
+      return { kind, enabled: false, mix: 0.35, amount: beatFractionToMs(1 / 2, FALLBACK_FX_BPM), rateHz: 0.45, feedback: 0.38, beatFraction: 1 / 2 };
   }
 }
 
@@ -57,18 +71,18 @@ export function adjustFxBeat(slot: ControllerFxSlot, direction: number): Control
 
   const currentIndex = nearestIndex(CONTROLLER_FX_BEATS, slot.beatFraction);
   const beatFraction = CONTROLLER_FX_BEATS[wrapIndex(currentIndex + direction, CONTROLLER_FX_BEATS.length)];
-  if (slot.kind === "flanger") {
+  if (slot.kind === "flanger" || slot.kind === "trans" || slot.kind === "phaser") {
     return { ...slot, beatFraction, rateHz: beatFractionToHz(beatFraction, FALLBACK_FX_BPM) };
   }
   return { ...slot, beatFraction, amount: beatFractionToMs(beatFraction, FALLBACK_FX_BPM) };
 }
 
 export function audioFxConfigForSlot(slot: ControllerFxSlot, bpm: number): DeckFxConfig {
-  if (slot.kind === "echo") {
+  if (slot.kind === "echo" || slot.kind === "spiral" || slot.kind === "delay" || slot.kind === "roll" || slot.kind === "slipRoll") {
     const { beatFraction: _beatFraction, ...config } = slot;
     return { ...config, amount: beatFractionToMs(slot.beatFraction, bpm) };
   }
-  if (slot.kind === "flanger") {
+  if (slot.kind === "flanger" || slot.kind === "trans" || slot.kind === "phaser") {
     const { beatFraction: _beatFraction, ...config } = slot;
     return { ...config, rateHz: beatFractionToHz(slot.beatFraction, bpm) };
   }
@@ -122,11 +136,11 @@ export function formatFxValue(value: number) {
 }
 
 export function fxTimingLabel(slot: ControllerFxSlot, bpm?: number) {
-  if (slot.kind === "echo") {
+  if (slot.kind === "echo" || slot.kind === "spiral" || slot.kind === "delay" || slot.kind === "roll" || slot.kind === "slipRoll") {
     const ms = beatFractionToMs(slot.beatFraction, bpm ?? FALLBACK_FX_BPM);
     return `${beatFractionLabel(slot.beatFraction)} (${Math.round(ms)}ms)`;
   }
-  if (slot.kind === "flanger") {
+  if (slot.kind === "flanger" || slot.kind === "trans" || slot.kind === "phaser") {
     return `${beatFractionLabel(slot.beatFraction)} (${beatFractionToHz(slot.beatFraction, bpm ?? FALLBACK_FX_BPM).toFixed(2)}Hz)`;
   }
   if (slot.kind === "reverb") return `${Math.round(slot.amount * 100)}%`;

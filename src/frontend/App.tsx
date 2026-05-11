@@ -5,16 +5,17 @@ import { DebugWindow, type DebugTab } from "./components/DebugWindow";
 import { Inspector } from "./components/Inspector";
 import { LibraryWorkspace } from "./components/LibraryWorkspace";
 import { PlayerDock } from "./components/PlayerDock";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { TrackDragOverlay } from "./components/TrackDragOverlay";
-import { audioDeckError, audioDeckLevelDb, audioDeckPosition, endAudioDeckScrub, loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, scrubAudioDeckToPosition, seekAudioDeck, setAudioDeckEq, setAudioDeckFilterAmount, setAudioDeckFxChain, setAudioDeckTempo, setAudioDeckVolume, setAudioMasterVolume, startAudioDeckScrub, usesBrowserAudioFixture, type DeckId } from "./api/audio";
+import { audioDeckError, audioDeckLevelDb, audioDeckPosition, endAudioDeckScrub, listAudioOutputs, loadAudioDeck, loadAudioWaveform, pauseAudioDeck, playAudioDeck, scrubAudioDeckToPosition, seekAudioDeck, setAudioDeckBeatSync, setAudioDeckCue, setAudioDeckEq, setAudioDeckFilterAmount, setAudioDeckFxChain, setAudioDeckTempo, setAudioDeckVolume, setAudioHeadphoneMix, setAudioHeadphoneVolume, setAudioMasterOutputDevice, setAudioMasterVolume, setAudioOutputDevice, setAudioOutputRouting, startAudioDeckScrub, usesBrowserAudioFixture, type AudioBeatGridMarker, type AudioOutputDevice, type AudioOutputRouting, type DeckFxKind, type DeckId } from "./api/audio";
 import type { ControllerAction } from "./api/controller";
 import { addRekordboxTracksToPlaylist, createRekordboxPlaylist, loadRekordboxBeatGrid, loadRekordboxLibrary, moveRekordboxPlaylistToFolder } from "./api/rekordbox";
 import { withRekordboxLibrary } from "./data/libraryMapping";
 import type { CurrentNode, PcData, PlaylistEntry, Track } from "./designTypes";
-import { clamp, crossfadeGain, estimatedDeckLevelDb, nextTempoRange, otherDeck, playbackRateFromTempo, sampleEnergyCurve, smoothMeterDb, syncedPositionForDeck, syncedTempoForDeck } from "./lib/audioMath";
-import { CONTROLLER_FX_KINDS, adjustFxBeat, audioFxConfigForSlot, cloneControllerFxState, controllerFxTarget, createControllerFxState, deckIdFromControllerAction, defaultControllerFxSlot, fxKindLabel, fxTargetLabel, fxTimingLabel, sendControllerFxFeedback, wrapIndex, type ControllerFxDebugState, type ControllerFxState } from "./lib/controllerFx";
+import { clamp, crossfadeGain, estimatedDeckLevelDb, nextTempoRange, otherDeck, playbackRateFromTempo, sampleEnergyCurve, smoothMeterDb, syncedTempoForDeck } from "./lib/audioMath";
+import { CONTROLLER_FX_KINDS, adjustFxBeat, audioFxConfigForSlot, cloneControllerFxState, controllerFxTarget, createControllerFxState, deckIdFromControllerAction, defaultControllerFxSlot, fxKindLabel, fxTargetLabel, fxTimingLabel, sendControllerFxFeedback, type ControllerFxDebugState, type ControllerFxState } from "./lib/controllerFx";
 import { deckFromDndDropId, deckFromDndTranslatedRect } from "./lib/dnd";
 import { currentNodesEqual, findPlaylist, findPlaylistParentNode, libraryBrowserNodes, movePlaylistEntry, playlistContains, recalculatePlaylistCounts, statusText, updatePlaylistEntries } from "./lib/library";
 import { useControllerPolling } from "./hooks/useControllerPolling";
@@ -30,6 +31,13 @@ type DeckEq = Record<EqBand, number>;
 type LibraryFocus = "tree" | "tracks";
 
 const CONTROLLER_JOG_SECONDS_PER_TICK = 0.012;
+
+function audioBeatGridForTrack(track: Track): AudioBeatGridMarker[] {
+  return (track.beatGrid ?? []).map((beat) => ({
+    timeSeconds: beat.timeSec,
+    beatNumber: beat.beatNumber
+  }));
+}
 
 export function App() {
   const mockData = useMemo(() => window.PC_DATA, []);
@@ -60,6 +68,7 @@ export function App() {
   });
   const [deckFilterAmounts, setDeckFilterAmounts] = useState({ A: 0, B: 0 });
   const [deckCuePoints, setDeckCuePoints] = useState({ A: 0, B: 0 });
+  const [deckCueEnabled, setDeckCueEnabled] = useState({ A: false, B: false });
   const tempoSendTimeouts = useRef<Record<DeckId, number | null>>({ A: null, B: null });
   const seekSendFrames = useRef<Record<DeckId, number | null>>({ A: null, B: null });
   const pendingSeekPositions = useRef<Record<DeckId, number>>({ A: 0, B: 0 });
@@ -81,7 +90,13 @@ export function App() {
   const [loadedDeckPaths, setLoadedDeckPaths] = useState<{ A: string | null; B: string | null }>({ A: null, B: null });
   const [crossfader, setCrossfader] = useState(0);
   const [masterVolume, setMasterVolume] = useState(0.9);
+  const [headphoneMix, setHeadphoneMix] = useState(0);
+  const [headphoneVolume, setHeadphoneVolume] = useState(0.9);
+  const [audioOutputRouting, setAudioOutputRoutingState] = useState<AudioOutputRouting>({ masterStart: 0, headphoneStart: 2 });
   const [audioStatus, setAudioStatus] = useState("Rust audio engine ready");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [audioOutputs, setAudioOutputs] = useState<AudioOutputDevice[]>([]);
+  const [loadingAudioOutputs, setLoadingAudioOutputs] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
   const [debugTab, setDebugTab] = useState<DebugTab>("midi");
   const [baseTrack, setBaseTrack] = useState<Track | null>(null);
@@ -103,6 +118,62 @@ export function App() {
   const reportAudioError = useCallback((error: unknown) => {
     setAudioStatus(error instanceof Error ? error.message : String(error));
   }, []);
+
+  const refreshAudioOutputs = useCallback(() => {
+    setLoadingAudioOutputs(true);
+    listAudioOutputs()
+      .then(setAudioOutputs)
+      .catch(reportAudioError)
+      .finally(() => setLoadingAudioOutputs(false));
+  }, [reportAudioError]);
+
+  const selectAudioOutput = useCallback((id: string) => {
+    const output = audioOutputs.find((device) => device.id === id);
+    const channelPairs = output ? Array.from({ length: Math.max(1, Math.floor(output.channels / 2)) }, (_, index) => index * 2) : [0];
+    const nextRouting = {
+      masterStart: channelPairs.includes(audioOutputRouting.masterStart) ? audioOutputRouting.masterStart : channelPairs[0],
+      headphoneStart: channelPairs.includes(audioOutputRouting.headphoneStart) ? audioOutputRouting.headphoneStart : channelPairs[0]
+    };
+    setAudioStatus(`Switching output${output ? ` to ${output.name}` : ""}...`);
+    setAudioOutputDevice(id)
+      .then(() => Promise.all([
+        setAudioOutputRouting(nextRouting.masterStart, nextRouting.headphoneStart),
+        setAudioMasterVolume(masterVolume),
+        setAudioHeadphoneVolume(headphoneVolume),
+        setAudioHeadphoneMix(headphoneMix),
+        setAudioDeckCue("A", deckCueEnabled.A),
+        setAudioDeckCue("B", deckCueEnabled.B)
+      ]))
+      .then(() => {
+        setAudioOutputRoutingState(nextRouting);
+        setLoadedDeckPaths({ A: null, B: null });
+        setDeckPlaying({ A: false, B: false });
+        setAudioStatus(output ? `Output: ${output.name}` : "Output changed");
+        refreshAudioOutputs();
+      })
+      .catch(reportAudioError);
+  }, [audioOutputRouting.headphoneStart, audioOutputRouting.masterStart, audioOutputs, deckCueEnabled.A, deckCueEnabled.B, headphoneMix, headphoneVolume, masterVolume, refreshAudioOutputs, reportAudioError]);
+
+  const selectMasterOutput = useCallback((id: string | null) => {
+    const output = id ? audioOutputs.find((device) => device.id === id) : null;
+    setAudioStatus(id ? `Mirroring master to ${output?.name ?? "output"}...` : "Disabling master mirror...");
+    setAudioMasterOutputDevice(id)
+      .then(() => Promise.all([
+        setAudioOutputRouting(audioOutputRouting.masterStart, audioOutputRouting.headphoneStart),
+        setAudioMasterVolume(masterVolume),
+        setAudioHeadphoneVolume(headphoneVolume),
+        setAudioHeadphoneMix(headphoneMix),
+        setAudioDeckCue("A", deckCueEnabled.A),
+        setAudioDeckCue("B", deckCueEnabled.B)
+      ]))
+      .then(() => {
+        setLoadedDeckPaths({ A: null, B: null });
+        setDeckPlaying({ A: false, B: false });
+        setAudioStatus(id ? `Master mirror: ${output?.name ?? "output"}` : "Master mirror off");
+        refreshAudioOutputs();
+      })
+      .catch(reportAudioError);
+  }, [audioOutputRouting.headphoneStart, audioOutputRouting.masterStart, audioOutputs, deckCueEnabled.A, deckCueEnabled.B, headphoneMix, headphoneVolume, masterVolume, refreshAudioOutputs, reportAudioError]);
 
   const reloadRekordboxLibrary = useCallback(async () => {
     const library = await loadRekordboxLibrary();
@@ -176,17 +247,30 @@ export function App() {
   }, [data.CRATES, data.TRACKS]);
 
   useEffect(() => {
+    if (settingsOpen) refreshAudioOutputs();
+  }, [refreshAudioOutputs, settingsOpen]);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isInput = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
 
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (event.ctrlKey && event.key === "Tab") {
+        event.preventDefault();
+        setMode((current) => current === "library" ? "mix" : "library");
+      } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPaletteOpen(true);
+      } else if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.code === "Backquote" || event.key === "`")) {
+        event.preventDefault();
+        setSettingsOpen((open) => !open);
       } else if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "d") {
         event.preventDefault();
         setDebugOpen((open) => !open);
         setDebugTab("midi");
+      } else if (event.key === "Escape" && settingsOpen) {
+        event.preventDefault();
+        setSettingsOpen(false);
       } else if (event.key === "Escape" && debugOpen) {
         event.preventDefault();
         setDebugOpen(false);
@@ -201,7 +285,7 @@ export function App() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [data.TRACKS, debugOpen, selected]);
+  }, [data.TRACKS, debugOpen, selected, settingsOpen]);
 
   useEffect(() => {
     if (!deckPlaying.A && !deckPlaying.B) return undefined;
@@ -215,11 +299,6 @@ export function App() {
         const nextA = deckPlaying.A ? Math.min(1, positions.A + (delta * playbackRateFromTempo(deckTempos.A)) / deckATrack.totalSec) : positions.A;
         const nextB = deckPlaying.B ? Math.min(1, positions.B + (delta * playbackRateFromTempo(deckTempos.B)) / deckBTrack.totalSec) : positions.B;
         const nextPositions = { A: nextA, B: nextB };
-        const follower = otherDeck(syncMaster);
-        if (syncEnabled[follower] && deckPlaying[follower] && deckPlaying[syncMaster]) {
-          const lockedPosition = syncedPositionForDeck(follower, syncMaster, deckATrack, deckBTrack, nextPositions);
-          if (lockedPosition !== null) nextPositions[follower] = lockedPosition;
-        }
 
         if ((deckPlaying.A && nextA >= 1) || (deckPlaying.B && nextB >= 1)) {
           setDeckPlaying((playing) => ({
@@ -234,7 +313,7 @@ export function App() {
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [deckATrack, deckBTrack, deckPlaying.A, deckPlaying.B, deckTempos.A, deckTempos.B, syncEnabled, syncMaster]);
+  }, [deckATrack, deckBTrack, deckPlaying.A, deckPlaying.B, deckTempos.A, deckTempos.B]);
 
   useEffect(() => {
     if (usesBrowserAudioFixture()) return undefined;
@@ -753,29 +832,6 @@ export function App() {
     };
   }, [addTracksToPlaylist, loadDeckByTrackId, movePlaylistToFolder]);
 
-  const setDeckPlayback = useCallback((deck: DeckId, playing: boolean) => {
-    const track = deck === "A" ? deckATrack : deckBTrack;
-    const requestedPosition = deck === "A" ? deckPositions.A : deckPositions.B;
-    setDeckPlaying((current) => ({ ...current, [deck]: playing }));
-
-    const command = async () => {
-      if (playing) {
-        await ensureDeckLoaded(deck, track);
-        await seekAudioDeck(deck, requestedPosition);
-        await playAudioDeck(deck);
-        setAudioStatus(`Deck ${deck} playing`);
-      } else {
-        await pauseAudioDeck(deck);
-        setAudioStatus(`Deck ${deck} paused`);
-      }
-    };
-
-    command().catch((error) => {
-      setDeckPlaying((current) => ({ ...current, [deck]: false }));
-      reportAudioError(error);
-    });
-  }, [deckATrack, deckBTrack, deckPositions.A, deckPositions.B, ensureDeckLoaded, reportAudioError]);
-
   const setDeckPosition = useCallback((deck: DeckId, position: number) => {
     deckPositionsRef.current = { ...deckPositionsRef.current, [deck]: position };
     setDeckPositions((current) => ({ ...current, [deck]: position }));
@@ -787,6 +843,11 @@ export function App() {
       seekAudioDeck(deck, pendingSeekPositions.current[deck]).catch(reportAudioError);
     });
   }, [reportAudioError]);
+
+  const setDeckPositionVisual = useCallback((deck: DeckId, position: number) => {
+    deckPositionsRef.current = { ...deckPositionsRef.current, [deck]: position };
+    setDeckPositions((current) => ({ ...current, [deck]: position }));
+  }, []);
 
   const startDeckScrub = useCallback((deck: DeckId) => {
     setDeckPlaying((current) => ({ ...current, [deck]: false }));
@@ -848,31 +909,106 @@ export function App() {
     }, 40);
   }, [reportAudioError]);
 
+  const loadDeckBeatGridForSync = useCallback(async (deck: DeckId) => {
+    const track = deck === "A" ? deckATrack : deckBTrack;
+    const trackWithBeatGrid = await loadBeatGridForTrack(track);
+    if (trackWithBeatGrid !== track) {
+      if (deck === "A") {
+        setDeckATrack((current) => current.id === track.id ? trackWithBeatGrid : current);
+      } else {
+        setDeckBTrack((current) => current.id === track.id ? trackWithBeatGrid : current);
+      }
+    }
+    return trackWithBeatGrid;
+  }, [deckATrack, deckBTrack, loadBeatGridForTrack]);
+
+  const configureBackendBeatSync = useCallback(async (follower: DeckId, master: DeckId, enabled: boolean) => {
+    const [followerTrack, masterTrack] = enabled
+      ? await Promise.all([
+          loadDeckBeatGridForSync(follower),
+          loadDeckBeatGridForSync(master)
+        ])
+      : [
+          follower === "A" ? deckATrack : deckBTrack,
+          master === "A" ? deckATrack : deckBTrack
+        ];
+
+    await setAudioDeckBeatSync({
+      follower,
+      master,
+      enabled,
+      followerBpm: followerTrack.bpm,
+      masterBpm: masterTrack.bpm,
+      followerBeatGrid: audioBeatGridForTrack(followerTrack),
+      masterBeatGrid: audioBeatGridForTrack(masterTrack)
+    });
+  }, [deckATrack, deckBTrack, loadDeckBeatGridForSync]);
+
+  const resyncBeatSyncForPlayback = useCallback(async (startedDeck: DeckId) => {
+    const follower = syncEnabled.A ? "A" : syncEnabled.B ? "B" : null;
+    if (!follower) return;
+    if (startedDeck !== follower && startedDeck !== syncMaster) return;
+
+    await configureBackendBeatSync(follower, syncMaster, true);
+    const position = await audioDeckPosition(follower);
+    setDeckPositionVisual(follower, position);
+  }, [configureBackendBeatSync, setDeckPositionVisual, syncEnabled.A, syncEnabled.B, syncMaster]);
+
+  const setDeckPlayback = useCallback((deck: DeckId, playing: boolean) => {
+    const track = deck === "A" ? deckATrack : deckBTrack;
+    const requestedPosition = deck === "A" ? deckPositions.A : deckPositions.B;
+    setDeckPlaying((current) => ({ ...current, [deck]: playing }));
+
+    const command = async () => {
+      if (playing) {
+        await ensureDeckLoaded(deck, track);
+        await seekAudioDeck(deck, requestedPosition);
+        await playAudioDeck(deck);
+        await resyncBeatSyncForPlayback(deck);
+        setAudioStatus(`Deck ${deck} playing`);
+      } else {
+        await pauseAudioDeck(deck);
+        setAudioStatus(`Deck ${deck} paused`);
+      }
+    };
+
+    command().catch((error) => {
+      setDeckPlaying((current) => ({ ...current, [deck]: false }));
+      reportAudioError(error);
+    });
+  }, [deckATrack, deckBTrack, deckPositions.A, deckPositions.B, ensureDeckLoaded, reportAudioError, resyncBeatSyncForPlayback]);
+
   const beatSyncDeck = useCallback((deck: DeckId) => {
     if (deck === syncMaster) {
       setSyncMaster(deck);
       setSyncEnabled((current) => ({ ...current, [deck]: false }));
+      configureBackendBeatSync(otherDeck(deck), deck, false).catch(reportAudioError);
       return;
     }
 
     if (syncEnabled[deck]) {
       setSyncEnabled((current) => ({ ...current, [deck]: false }));
+      configureBackendBeatSync(deck, syncMaster, false).catch(reportAudioError);
       return;
     }
 
     const master = syncMaster;
     const nextTempo = syncedTempoForDeck(deck, master, deckATrack, deckBTrack, deckTempos);
-    const nextPosition = syncedPositionForDeck(deck, master, deckATrack, deckBTrack, deckPositions);
 
     setSyncEnabled((current) => ({ ...current, [deck]: true, [master]: false }));
-    if (nextTempo !== null) setDeckTempo(deck, nextTempo);
-    if (nextPosition !== null) setDeckPosition(deck, nextPosition);
-  }, [deckATrack, deckBTrack, deckPositions, deckTempos, setDeckPosition, setDeckTempo, syncEnabled, syncMaster]);
+    if (nextTempo !== null) setDeckTempos((current) => ({ ...current, [deck]: nextTempo }));
+    configureBackendBeatSync(deck, master, true)
+      .then(() => audioDeckPosition(deck))
+      .then((position) => setDeckPositionVisual(deck, position))
+      .catch(reportAudioError);
+  }, [configureBackendBeatSync, deckATrack, deckBTrack, deckTempos, reportAudioError, setDeckPositionVisual, syncEnabled, syncMaster]);
 
   const setDeckAsMaster = useCallback((deck: DeckId) => {
+    const previousFollower = otherDeck(syncMaster);
+    configureBackendBeatSync(previousFollower, syncMaster, false).catch(reportAudioError);
     setSyncMaster(deck);
     setSyncEnabled((current) => ({ ...current, [deck]: false }));
-  }, []);
+  }, [configureBackendBeatSync, reportAudioError, syncMaster]);
 
   useEffect(() => {
     const follower = otherDeck(syncMaster);
@@ -880,26 +1016,14 @@ export function App() {
 
     const nextTempo = syncedTempoForDeck(follower, syncMaster, deckATrack, deckBTrack, deckTempos);
     if (nextTempo === null || Math.abs(nextTempo - deckTempos[follower]) < 0.01) return;
-    setDeckTempo(follower, nextTempo);
-  }, [deckATrack, deckBTrack, deckTempos, setDeckTempo, syncEnabled, syncMaster]);
+    setDeckTempos((current) => ({ ...current, [follower]: nextTempo }));
+  }, [deckATrack, deckBTrack, deckTempos, syncEnabled, syncMaster]);
 
   useEffect(() => {
     const follower = otherDeck(syncMaster);
-    if (!syncEnabled[follower] || !deckPlaying[follower] || !deckPlaying[syncMaster]) return undefined;
-
-    const interval = window.setInterval(() => {
-      const positions = deckPositionsRef.current;
-      const targetPosition = syncedPositionForDeck(follower, syncMaster, deckATrack, deckBTrack, positions);
-      if (targetPosition === null) return;
-
-      const followerTrack = follower === "A" ? deckATrack : deckBTrack;
-      const diffSec = Math.abs(targetPosition - positions[follower]) * followerTrack.totalSec;
-      if (diffSec < 0.12) return;
-      setDeckPosition(follower, targetPosition);
-    }, 1_000);
-
-    return () => window.clearInterval(interval);
-  }, [deckATrack, deckBTrack, deckPlaying, setDeckPosition, syncEnabled, syncMaster]);
+    if (!syncEnabled[follower]) return;
+    configureBackendBeatSync(follower, syncMaster, true).catch(reportAudioError);
+  }, [configureBackendBeatSync, reportAudioError, syncEnabled, syncMaster]);
 
   const cycleDeckTempoRange = useCallback((deck: DeckId) => {
     const nextRange = nextTempoRange(deckTempoRanges[deck]);
@@ -942,6 +1066,11 @@ export function App() {
     setAudioDeckFilterAmount(deck, amount).catch(reportAudioError);
   }, [reportAudioError]);
 
+  const setDeckHeadphoneCue = useCallback((deck: DeckId, enabled: boolean) => {
+    setDeckCueEnabled((current) => ({ ...current, [deck]: enabled }));
+    setAudioDeckCue(deck, enabled).catch(reportAudioError);
+  }, [reportAudioError]);
+
   const sendControllerFxState = useCallback((state: ControllerFxState, target = state.target) => {
     const activeSlots = state.slots.filter((slot) => slot.enabled);
     const deckAEffects = target === "A" || target === "both" ? activeSlots.map((slot) => audioFxConfigForSlot(slot, deckTracksRef.current.A.bpm)) : [];
@@ -956,7 +1085,7 @@ export function App() {
       slots: controllerFxRef.current.slots.map((slot) => ({ ...slot }))
     };
     update(state);
-    state.focusIndex = wrapIndex(state.focusIndex, state.slots.length);
+    state.focusIndex = ((state.focusIndex % state.slots.length) + state.slots.length) % state.slots.length;
     controllerFxRef.current = state;
     setControllerFxDebug(cloneControllerFxState(state));
     const focusedSlot = state.slots[state.focusIndex];
@@ -964,6 +1093,18 @@ export function App() {
     sendControllerFxFeedback(state);
     if (send) sendControllerFxState(state);
   }, [sendControllerFxState]);
+
+  const setFocusedFxKindFromUi = useCallback((kind: DeckFxKind) => {
+    updateControllerFxState((state) => {
+      setFocusedFxKind(state, kind);
+    });
+  }, [updateControllerFxState]);
+
+  const setFocusedFxActiveFromUi = useCallback((enabled: boolean) => {
+    updateControllerFxState((state) => {
+      state.slots[state.focusIndex].enabled = enabled;
+    });
+  }, [updateControllerFxState]);
 
   const handleDeckCueAction = useCallback((deck: DeckId) => {
     const playing = deck === "A" ? deckPlaying.A : deckPlaying.B;
@@ -980,6 +1121,27 @@ export function App() {
   const updateMasterVolume = useCallback((volume: number) => {
     setMasterVolume(volume);
     setAudioMasterVolume(volume).catch(reportAudioError);
+  }, [reportAudioError]);
+
+  const updateHeadphoneMix = useCallback((mix: number) => {
+    const nextMix = clamp(mix, 0, 1);
+    setHeadphoneMix(nextMix);
+    setAudioHeadphoneMix(nextMix).catch(reportAudioError);
+  }, [reportAudioError]);
+
+  const updateHeadphoneVolume = useCallback((volume: number) => {
+    const nextVolume = clamp(volume, 0, 1);
+    setHeadphoneVolume(nextVolume);
+    setAudioHeadphoneVolume(nextVolume).catch(reportAudioError);
+  }, [reportAudioError]);
+
+  const updateAudioOutputRouting = useCallback((routing: AudioOutputRouting) => {
+    const nextRouting = {
+      masterStart: Math.max(0, Math.floor(routing.masterStart)),
+      headphoneStart: Math.max(0, Math.floor(routing.headphoneStart))
+    };
+    setAudioOutputRoutingState(nextRouting);
+    setAudioOutputRouting(nextRouting.masterStart, nextRouting.headphoneStart).catch(reportAudioError);
   }, [reportAudioError]);
 
   const onPreview = useCallback((track: Track, play = false) => {
@@ -1032,6 +1194,9 @@ export function App() {
       case "cue":
         if (action.pressed) handleDeckCueAction(deck);
         break;
+      case "headphoneCue":
+        setDeckHeadphoneCue(deck, action.enabled);
+        break;
       case "loadSelected":
         loadDeckByTrackId(deck, selectedRef.current);
         break;
@@ -1064,19 +1229,18 @@ export function App() {
       case "crossfader":
         setMixerCrossfader(action.value * 2 - 1);
         break;
+      case "headphoneMix":
+        updateHeadphoneMix(action.value);
+        break;
+      case "headphoneVolume":
+        updateHeadphoneVolume(action.value);
+        break;
       case "hotCue":
         break;
       case "fxSelect":
         if (action.pressed) {
           updateControllerFxState((state) => {
-            const slot = state.slots[state.focusIndex];
-            const currentKindIndex = CONTROLLER_FX_KINDS.indexOf(slot.kind);
-            const nextKind = CONTROLLER_FX_KINDS[wrapIndex(currentKindIndex + action.direction, CONTROLLER_FX_KINDS.length)];
-            state.slots[state.focusIndex] = {
-              ...defaultControllerFxSlot(nextKind),
-              enabled: slot.enabled,
-              mix: slot.mix
-            };
+            setFocusedFxKind(state, nextFxKind(state.slots[state.focusIndex].kind, action.direction));
           });
         }
         break;
@@ -1130,7 +1294,7 @@ export function App() {
       case "raw":
         break;
     }
-  }, [beatSyncDeck, cycleDeckTempoRange, endDeckScrub, handleDeckCueAction, handleLibraryBrowse, handleLibraryBrowsePress, loadDeckByTrackId, moveDeckByJogTicks, setDeckEq, setDeckFilter, setDeckPlayback, setDeckTempo, setDeckVolume, setMixerCrossfader, startDeckScrub, updateControllerFxState]);
+  }, [beatSyncDeck, cycleDeckTempoRange, endDeckScrub, handleDeckCueAction, handleLibraryBrowse, handleLibraryBrowsePress, loadDeckByTrackId, moveDeckByJogTicks, setDeckEq, setDeckFilter, setDeckHeadphoneCue, setDeckPlayback, setDeckTempo, setDeckVolume, setMixerCrossfader, startDeckScrub, updateControllerFxState, updateHeadphoneMix, updateHeadphoneVolume]);
 
   const { clearMidiDebugEvents, controllerStatus, midiDebugEvents, setControllerStatus } = useControllerPolling(handleControllerAction);
 
@@ -1175,6 +1339,7 @@ export function App() {
       <TopBar
         mode={mode}
         onSearchClick={openPalette}
+        onSettingsClick={() => setSettingsOpen(true)}
         query={paletteQuery || `${statusText(libraryStatus, data.TRACKS.length, libraryError)} · ${controllerStatus}`}
         setMode={setMode}
       />
@@ -1216,17 +1381,25 @@ export function App() {
       ) : (
         <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(0,1fr)]">
           <PlayerDock
-            deckA={{ track: deckATrack, playing: deckPlaying.A, position: deckPositions.A, levelDb: deckLevelsDb.A, syncEnabled: syncEnabled.A, syncRole: syncMaster === "A" ? "master" : "follower", tempoPercent: deckTempos.A, tempoRange: deckTempoRanges.A, volume: deckVolumes.A, eq: deckEq.A, filterAmount: deckFilterAmounts.A, cuePoint: deckCuePoints.A }}
-            deckB={{ track: deckBTrack, playing: deckPlaying.B, position: deckPositions.B, levelDb: deckLevelsDb.B, syncEnabled: syncEnabled.B, syncRole: syncMaster === "B" ? "master" : "follower", tempoPercent: deckTempos.B, tempoRange: deckTempoRanges.B, volume: deckVolumes.B, eq: deckEq.B, filterAmount: deckFilterAmounts.B, cuePoint: deckCuePoints.B }}
+            deckA={{ track: deckATrack, playing: deckPlaying.A, position: deckPositions.A, levelDb: deckLevelsDb.A, syncEnabled: syncEnabled.A, syncRole: syncMaster === "A" ? "master" : "follower", tempoPercent: deckTempos.A, tempoRange: deckTempoRanges.A, volume: deckVolumes.A, eq: deckEq.A, filterAmount: deckFilterAmounts.A, cuePoint: deckCuePoints.A, cueEnabled: deckCueEnabled.A }}
+            deckB={{ track: deckBTrack, playing: deckPlaying.B, position: deckPositions.B, levelDb: deckLevelsDb.B, syncEnabled: syncEnabled.B, syncRole: syncMaster === "B" ? "master" : "follower", tempoPercent: deckTempos.B, tempoRange: deckTempoRanges.B, volume: deckVolumes.B, eq: deckEq.B, filterAmount: deckFilterAmounts.B, cuePoint: deckCuePoints.B, cueEnabled: deckCueEnabled.B }}
             crossfader={crossfader}
+            fxState={controllerFxDebug}
+            headphoneMix={headphoneMix}
+            headphoneVolume={headphoneVolume}
             trackDragActive={activeDragTrackId !== null}
             onBeatSync={beatSyncDeck}
             onCycleTempoRange={cycleDeckTempoRange}
             onSetMasterDeck={setDeckAsMaster}
             onSetCrossfader={setMixerCrossfader}
             onCueAction={handleDeckCueAction}
+            onSetCue={setDeckHeadphoneCue}
             onSetEq={setDeckEq}
             onSetFilter={setDeckFilter}
+            onSetFxActive={setFocusedFxActiveFromUi}
+            onSetFxKind={setFocusedFxKindFromUi}
+            onSetHeadphoneMix={updateHeadphoneMix}
+            onSetHeadphoneVolume={updateHeadphoneVolume}
             onSetPlaying={setDeckPlayback}
             onSetPosition={setDeckPosition}
             onSetTempo={setDeckTempo}
@@ -1294,10 +1467,54 @@ export function App() {
           onSetTab={setDebugTab}
         />
       )}
+      {settingsOpen && (
+        <SettingsPanel
+          audioOutputs={audioOutputs}
+          audioStatus={audioStatus}
+          controllerStatus={controllerStatus}
+          deckCueEnabled={deckCueEnabled}
+          headphoneMix={headphoneMix}
+          headphoneVolume={headphoneVolume}
+          loadingAudioOutputs={loadingAudioOutputs}
+          masterVolume={masterVolume}
+          outputRouting={audioOutputRouting}
+          onClose={() => setSettingsOpen(false)}
+          onRefreshAudioOutputs={refreshAudioOutputs}
+          onSelectMasterOutput={selectMasterOutput}
+          onSelectAudioOutput={selectAudioOutput}
+          onSetDeckCue={setDeckHeadphoneCue}
+          onSetHeadphoneMix={updateHeadphoneMix}
+          onSetHeadphoneVolume={updateHeadphoneVolume}
+          onSetMasterVolume={updateMasterVolume}
+          onSetOutputRouting={updateAudioOutputRouting}
+        />
+      )}
       <DragOverlay dropAnimation={null}>
         {activeDragTrack && <TrackDragOverlay track={activeDragTrack} />}
       </DragOverlay>
     </div>
     </DndContext>
   );
+}
+
+function controllerFxBpm(state: ControllerFxState, tracks: Record<DeckId, Track>) {
+  if (state.target === "A") return tracks.A.bpm;
+  if (state.target === "B") return tracks.B.bpm;
+  if (tracks.A.bpm > 0 && tracks.B.bpm > 0) return (tracks.A.bpm + tracks.B.bpm) / 2;
+  return tracks.A.bpm || tracks.B.bpm || 120;
+}
+
+function nextFxKind(kind: DeckFxKind, direction: number) {
+  const index = CONTROLLER_FX_KINDS.indexOf(kind);
+  const nextIndex = ((index + direction) % CONTROLLER_FX_KINDS.length + CONTROLLER_FX_KINDS.length) % CONTROLLER_FX_KINDS.length;
+  return CONTROLLER_FX_KINDS[nextIndex];
+}
+
+function setFocusedFxKind(state: ControllerFxState, kind: DeckFxKind) {
+  const slot = state.slots[state.focusIndex];
+  state.slots[state.focusIndex] = {
+    ...defaultControllerFxSlot(kind),
+    enabled: slot.enabled,
+    mix: slot.mix
+  };
 }

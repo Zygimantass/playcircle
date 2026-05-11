@@ -1,15 +1,76 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use playcircle_audio::{decoder::decode_file, AudioEngine, DeckFxConfig, DeckFxKind, DeckId};
+use playcircle_audio::{
+    decoder::decode_file, list_output_devices as list_audio_output_devices, AudioBeatGridMarker,
+    AudioEngine, AudioOutputDevice, DeckFxConfig, DeckFxKind, DeckId,
+};
 use playcircle_controller::{ControllerDevice, ControllerEvent, ControllerManager};
 use playcircle_rekordbox::{
     RekordboxBeat, RekordboxDatabase, RekordboxLibrary, RekordboxPlaylist, RekordboxTrack,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-struct AudioEngineState(Mutex<Option<AudioEngine>>);
+struct AudioEngineState(Mutex<AudioEngineHandle>);
 struct ControllerState(Mutex<ControllerManager>);
+
+struct AudioEngineHandle {
+    engine: Option<AudioEngine>,
+    output_device_id: Option<String>,
+    master_output_device_id: Option<String>,
+}
+
+impl AudioEngineHandle {
+    fn new() -> Self {
+        Self {
+            engine: None,
+            output_device_id: None,
+            master_output_device_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioOutputDeviceDto {
+    id: String,
+    name: String,
+    channels: u16,
+    sample_rate: u32,
+    cue_supported: bool,
+    selected: bool,
+    master_selected: bool,
+}
+
+impl From<AudioOutputDevice> for AudioOutputDeviceDto {
+    fn from(device: AudioOutputDevice) -> Self {
+        Self {
+            id: device.id,
+            name: device.name,
+            channels: device.channels,
+            sample_rate: device.sample_rate,
+            cue_supported: device.cue_supported,
+            selected: device.selected,
+            master_selected: device.master_selected,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioBeatGridMarkerDto {
+    time_seconds: f64,
+    beat_number: i32,
+}
+
+impl From<AudioBeatGridMarkerDto> for AudioBeatGridMarker {
+    fn from(marker: AudioBeatGridMarkerDto) -> Self {
+        Self {
+            time_seconds: marker.time_seconds,
+            beat_number: marker.beat_number,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +90,12 @@ enum AudioDeckFxKindDto {
     Reverb,
     Crush,
     Flanger,
+    Spiral,
+    Delay,
+    Trans,
+    Phaser,
+    Roll,
+    SlipRoll,
 }
 
 impl From<AudioDeckFxKindDto> for DeckFxKind {
@@ -38,6 +105,12 @@ impl From<AudioDeckFxKindDto> for DeckFxKind {
             AudioDeckFxKindDto::Reverb => DeckFxKind::Reverb,
             AudioDeckFxKindDto::Crush => DeckFxKind::Crush,
             AudioDeckFxKindDto::Flanger => DeckFxKind::Flanger,
+            AudioDeckFxKindDto::Spiral => DeckFxKind::Spiral,
+            AudioDeckFxKindDto::Delay => DeckFxKind::Delay,
+            AudioDeckFxKindDto::Trans => DeckFxKind::Trans,
+            AudioDeckFxKindDto::Phaser => DeckFxKind::Phaser,
+            AudioDeckFxKindDto::Roll => DeckFxKind::Roll,
+            AudioDeckFxKindDto::SlipRoll => DeckFxKind::SlipRoll,
         }
     }
 }
@@ -196,6 +269,62 @@ fn audio_waveform(frames: &[[f32; 2]], bins: usize) -> Vec<(f32, f32)> {
 }
 
 #[tauri::command]
+fn list_audio_outputs(
+    state: tauri::State<'_, AudioEngineState>,
+) -> Result<Vec<AudioOutputDeviceDto>, String> {
+    let selected_id = {
+        let guard = state
+            .0
+            .lock()
+            .map_err(|_| "audio engine state lock poisoned".to_string())?;
+        (
+            guard.output_device_id.clone(),
+            guard.master_output_device_id.clone(),
+        )
+    };
+    list_audio_output_devices(selected_id.0.as_deref(), selected_id.1.as_deref())
+        .map(|devices| devices.into_iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+fn set_audio_output_device(
+    state: tauri::State<'_, AudioEngineState>,
+    id: String,
+) -> Result<(), String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "audio engine state lock poisoned".to_string())?;
+    let output_device_id = if id == "default" { None } else { Some(id) };
+    let engine = AudioEngine::new_for_output_devices(
+        output_device_id.as_deref(),
+        guard.master_output_device_id.as_deref(),
+    )?;
+    guard.engine = Some(engine);
+    guard.output_device_id = output_device_id;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_audio_master_output_device(
+    state: tauri::State<'_, AudioEngineState>,
+    id: Option<String>,
+) -> Result<(), String> {
+    let mut guard = state
+        .0
+        .lock()
+        .map_err(|_| "audio engine state lock poisoned".to_string())?;
+    let master_output_device_id = id.filter(|value| value != "off");
+    let engine = AudioEngine::new_for_output_devices(
+        guard.output_device_id.as_deref(),
+        master_output_device_id.as_deref(),
+    )?;
+    guard.engine = Some(engine);
+    guard.master_output_device_id = master_output_device_id;
+    Ok(())
+}
+
+#[tauri::command]
 fn load_audio_deck(
     state: tauri::State<'_, AudioEngineState>,
     deck: String,
@@ -285,6 +414,32 @@ fn set_audio_deck_tempo(
 }
 
 #[tauri::command]
+fn set_audio_deck_beat_sync(
+    state: tauri::State<'_, AudioEngineState>,
+    follower: String,
+    master: String,
+    enabled: bool,
+    follower_bpm: f64,
+    master_bpm: f64,
+    follower_beat_grid: Vec<AudioBeatGridMarkerDto>,
+    master_beat_grid: Vec<AudioBeatGridMarkerDto>,
+) -> Result<(), String> {
+    let follower_beat_grid = follower_beat_grid.into_iter().map(Into::into).collect();
+    let master_beat_grid = master_beat_grid.into_iter().map(Into::into).collect();
+    with_audio_engine(&state, |engine| {
+        engine.set_deck_beat_sync(
+            DeckId::from_label(&follower)?,
+            DeckId::from_label(&master)?,
+            enabled,
+            follower_bpm,
+            master_bpm,
+            follower_beat_grid,
+            master_beat_grid,
+        )
+    })
+}
+
+#[tauri::command]
 fn set_audio_deck_filter(
     state: tauri::State<'_, AudioEngineState>,
     deck: String,
@@ -358,6 +513,33 @@ fn set_audio_master_volume(
     volume: f32,
 ) -> Result<(), String> {
     with_audio_engine(&state, |engine| engine.set_master_volume(volume))
+}
+
+#[tauri::command]
+fn set_audio_headphone_volume(
+    state: tauri::State<'_, AudioEngineState>,
+    volume: f32,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| engine.set_headphone_volume(volume))
+}
+
+#[tauri::command]
+fn set_audio_headphone_mix(
+    state: tauri::State<'_, AudioEngineState>,
+    mix: f32,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| engine.set_headphone_mix(mix))
+}
+
+#[tauri::command]
+fn set_audio_output_routing(
+    state: tauri::State<'_, AudioEngineState>,
+    master_start: usize,
+    headphone_start: usize,
+) -> Result<(), String> {
+    with_audio_engine(&state, |engine| {
+        engine.set_output_routing(master_start, headphone_start)
+    })
 }
 
 #[tauri::command]
@@ -454,16 +636,19 @@ fn with_audio_engine<T>(
         .0
         .lock()
         .map_err(|_| "audio engine state lock poisoned".to_string())?;
-    if guard.is_none() {
-        *guard = Some(AudioEngine::new()?);
+    if guard.engine.is_none() {
+        guard.engine = Some(AudioEngine::new_for_output_devices(
+            guard.output_device_id.as_deref(),
+            guard.master_output_device_id.as_deref(),
+        )?);
     }
-    action(guard.as_ref().expect("audio engine initialized"))
+    action(guard.engine.as_ref().expect("audio engine initialized"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(AudioEngineState(Mutex::new(None)))
+        .manage(AudioEngineState(Mutex::new(AudioEngineHandle::new())))
         .manage(ControllerState(Mutex::new(ControllerManager::new())))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -474,6 +659,9 @@ pub fn run() {
             move_rekordbox_playlist_to_folder,
             load_rekordbox_beat_grid,
             load_audio_waveform,
+            list_audio_outputs,
+            set_audio_output_device,
+            set_audio_master_output_device,
             load_audio_deck,
             play_audio_deck,
             pause_audio_deck,
@@ -483,6 +671,7 @@ pub fn run() {
             end_audio_deck_scrub,
             set_audio_deck_volume,
             set_audio_deck_tempo,
+            set_audio_deck_beat_sync,
             set_audio_deck_filter,
             set_audio_deck_filter_amount,
             set_audio_deck_eq,
@@ -490,6 +679,9 @@ pub fn run() {
             set_audio_deck_fx_chain,
             clear_audio_deck_fx,
             set_audio_master_volume,
+            set_audio_headphone_volume,
+            set_audio_headphone_mix,
+            set_audio_output_routing,
             audio_deck_position,
             audio_deck_error,
             audio_deck_level_db,
